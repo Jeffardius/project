@@ -77,7 +77,7 @@ if ($extDhcp -ne 'Enabled') {
 }
 
 # ----------------------------------------------
-# 5. IP Forwarding (registry) + Routing service (with reboot warning)
+# 5. IP Forwarding (registry) + Routing service
 # ----------------------------------------------
 $routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 $ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
@@ -86,14 +86,12 @@ if ($ipEnableRouter.IPEnableRouter -ne 1) {
     Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
 }
 
-# Ensure Routing feature is installed (required for RemoteAccess service)
 $routingFeature = Get-WindowsFeature -Name Routing
 if (-not $routingFeature.Installed) {
     Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
 }
 
-# Try to start RemoteAccess service; if it fails, set to Automatic and warn for reboot
 $ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
 if ($ras.Status -ne 'Running') {
     Write-Host "[ACTION] Attempting to start RemoteAccess service..." -ForegroundColor Yellow
@@ -102,7 +100,7 @@ if ($ras.Status -ne 'Running') {
         Start-Service RemoteAccess -ErrorAction Stop
         Write-Host "[INFO] RemoteAccess service started successfully." -ForegroundColor Green
     } catch {
-        Write-Host "[WARNING] RemoteAccess service could not be started. A reboot is required for NAT to work." -ForegroundColor Red
+        Write-Host "[WARNING] RemoteAccess service could not be started. A reboot may be required for NAT to work." -ForegroundColor Red
         Write-Host "[INFO] The service has been set to start automatically. Please reboot the Gateway VM later." -ForegroundColor Yellow
     }
 } else {
@@ -133,7 +131,15 @@ if ($dhcpSvc.Status -ne 'Running') {
     Start-Service DHCPServer
     Set-Service DHCPServer -StartupType Automatic
 }
-Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
+
+# Authorize DHCP server only if domain-joined (otherwise ignore)
+$domainStatus = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+if ($domainStatus) {
+    Write-Host "[INFO] Domain-joined – authorizing DHCP server..." -ForegroundColor Yellow
+    Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
+} else {
+    Write-Host "[INFO] Workgroup environment – DHCP authorization skipped (not required)." -ForegroundColor Cyan
+}
 
 $scopeId = "192.168.99.0"
 $existingScope = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
@@ -211,6 +217,6 @@ Write-Host "  - External : $externalIf (DHCP)" -ForegroundColor Green
 Write-Host "  - Internal : $internalIf = 192.168.99.1/29" -ForegroundColor Green
 Write-Host "  - NAT rule created (will work after RemoteAccess starts)" -ForegroundColor Green
 if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
-    Write-Host "  - [REBOOT REQUIRED] Please restart the Gateway VM for NAT to function." -ForegroundColor Red
+    Write-Host "  - [REBOOT RECOMMENDED] Please restart the Gateway VM for NAT to function." -ForegroundColor Red
 }
 Write-Host "=========================================================" -ForegroundColor Cyan
