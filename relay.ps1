@@ -123,10 +123,8 @@ if (-not $existingScope) {
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 6. Create fwon / fwoff shortcuts (ALWAYS recreate them)
-#    (These will toggle SSH allow / ICMP block from the Host OS IP)
+# 6. Create fwon / fwoff shortcuts for Relay (ALWAYS recreate)
 # ----------------------------------------------
-# First, get or prompt for Host IP (store for later use)
 $hostIPFile = "C:\Lab4_Relay_HostIP.txt"
 if (-not (Test-Path $hostIPFile)) {
     $HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.0.66)"
@@ -144,25 +142,42 @@ $fwoffPath = "$LabDir\fwoff.ps1"
 
 Write-Host "[ACTION] Creating/updating fwon.ps1 and fwoff.ps1 on Relay..." -ForegroundColor Yellow
 
-$fwonScript = @"
-`$HostIPFile = "C:\Lab4_Relay_HostIP.txt"
-if (Test-Path `$HostIPFile) { `$HostIP = Get-Content `$HostIPFile } else { `$HostIP = Read-Host "Enter Host OS IP" ; `$HostIP | Out-File `$HostIPFile -Force }
-Remove-NetFirewallRule -DisplayName "Relay-Allow-SSH-Host","Relay-Block-ICMP-Host" -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Relay-Allow-SSH-Host" -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow -RemoteAddress `$HostIP | Out-Null
-New-NetFirewallRule -DisplayName "Relay-Block-ICMP-Host" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block -RemoteAddress `$HostIP | Out-Null
-Start-Service sshd -ErrorAction SilentlyContinue
-Write-Host "Firewall on Relay is now ON and persistent." -ForegroundColor Green
-"@
-$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
+$fwonScript = @'
+$HostIPFile = "C:\Lab4_Relay_HostIP.txt"
+if (Test-Path $HostIPFile) {
+    $HostIP = Get-Content $HostIPFile
+} else {
+    $HostIP = Read-Host "Enter your Host OS IP address"
+    $HostIP | Out-File $HostIPFile -Force
+}
 
-$fwoffScript = @"
-Remove-NetFirewallRule -DisplayName "Relay-Allow-SSH-Host","Relay-Block-ICMP-Host" -ErrorAction SilentlyContinue
-Remove-Item -Path "C:\Lab4_Relay_HostIP.txt" -ErrorAction SilentlyContinue
-Write-Host "Firewall rules on Relay are now PERMANENTLY OFF." -ForegroundColor Green
-"@
+Remove-NetFirewallRule -DisplayName "Relay-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Relay-Block-ICMP-Host" -ErrorAction SilentlyContinue
+
+Disable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbound -ErrorAction SilentlyContinue
+
+New-NetFirewallRule -DisplayName "Relay-Allow-SSH-Host" `
+    -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
+    -RemoteAddress $HostIP -Profile Any | Out-Null
+
+New-NetFirewallRule -DisplayName "Relay-Block-ICMP-Host" `
+    -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
+    -RemoteAddress $HostIP -Profile Any | Out-Null
+
+Start-Service sshd -ErrorAction SilentlyContinue
+Write-Host "Relay firewall ON: SSH allowed (only from $HostIP), ICMP blocked (only from $HostIP)." -ForegroundColor Green
+'@
+
+$fwoffScript = @'
+Remove-NetFirewallRule -DisplayName "Relay-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Relay-Block-ICMP-Host" -ErrorAction SilentlyContinue
+Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbound -ErrorAction SilentlyContinue
+Write-Host "Relay firewall OFF: Custom rules removed. Default ICMP echo rule enabled (ping allowed)." -ForegroundColor Green
+'@
+
+$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
 $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8 -Force
 
-# Create .cmd wrappers (always recreate)
 $fwonCmd = "C:\Windows\fwon_relay.cmd"
 $fwoffCmd = "C:\Windows\fwoff_relay.cmd"
 Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
@@ -177,7 +192,7 @@ Write-Host "  - Internal ($internalIf) : should have 192.168.99.2 (from Gateway 
 Write-Host "  - Bridged ($bridgedIf)   : static 192.168.99.81/28" -ForegroundColor Green
 Write-Host "  - DHCP server for Node ready (assigns 192.168.99.82)" -ForegroundColor Green
 if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
-    Write-Host "  - [REBOOT RECOMMENDED] Please restart the Relay VM for routing to function." -ForegroundColor Red
+    Write-Host "  - [REBOOT RECOMMENDED] Restart Relay VM for routing to function." -ForegroundColor Red
 }
-Write-Host "  - Shortcuts 'fwon_relay' and 'fwoff_relay' are now available (persistent firewall toggle)." -ForegroundColor Green
+Write-Host "  - Commands 'fwon_relay' / 'fwoff_relay' now available (persistent firewall toggle)." -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Cyan
