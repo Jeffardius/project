@@ -193,16 +193,17 @@ if (-not $icmpRule) {
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 9. Create fwon / fwoff shortcuts (ALWAYS recreate with improved logic)
+# 9. Create fwon / fwoff shortcuts (ALWAYS recreate)
 # ----------------------------------------------
 $LabDir = "C:\Lab4"
-if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
+if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir -Force | Out-Null }
 
 $fwonPath = "$LabDir\fwon.ps1"
 $fwoffPath = "$LabDir\fwoff.ps1"
 
 Write-Host "[ACTION] Creating/updating fwon.ps1 and fwoff.ps1..." -ForegroundColor Yellow
 
+# fwon.ps1 content
 $fwonScript = @'
 $HostIPFile = "C:\Lab4_HostIP.txt"
 if (Test-Path $HostIPFile) {
@@ -229,6 +230,7 @@ Start-Service sshd -ErrorAction SilentlyContinue
 Write-Host "Firewall ON: SSH allowed (only from $HostIP), ICMP blocked (only from $HostIP)." -ForegroundColor Green
 '@
 
+# fwoff.ps1 content
 $fwoffScript = @'
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
@@ -236,17 +238,22 @@ Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbou
 Write-Host "Firewall OFF: Custom rules removed. Default ICMP echo rule enabled (ping allowed)." -ForegroundColor Green
 '@
 
-$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
-$fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8 -Force
+# Write the scripts (force overwrite)
+Set-Content -Path $fwonPath -Value $fwonScript -Encoding UTF8 -Force
+Set-Content -Path $fwoffPath -Value $fwoffScript -Encoding UTF8 -Force
 
-# Recreate .cmd wrappers with double quotes
+# Create .cmd wrappers with double quotes (recreate every time)
 $fwonCmd = "C:\Windows\fwon.cmd"
 $fwoffCmd = "C:\Windows\fwoff.cmd"
+
 Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $fwoffCmd -Force -ErrorAction SilentlyContinue
 
-"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`"" | Out-File -FilePath $fwonCmd -Encoding ascii
-"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`"" | Out-File -FilePath $fwoffCmd -Encoding ascii
+$fwonCmdContent = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`""
+$fwoffCmdContent = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`""
+
+Set-Content -Path $fwonCmd -Value $fwonCmdContent -Encoding ASCII -Force
+Set-Content -Path $fwoffCmd -Value $fwoffCmdContent -Encoding ASCII -Force
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
