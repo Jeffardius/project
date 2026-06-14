@@ -1,69 +1,116 @@
-#Requires -RunAsAdministrator
-$ErrorActionPreference = "Stop"
+#!/bin/bash
+# Lab 4 Gateway Setup Script (Ubuntu)
+# Requirements: Internal 192.168.99.0/29, DHCP .2 for Relay, Strict Firewall, NAT
 
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  Lab 4: Windows Server 2022 Core Gateway Setup" -ForegroundColor Cyan
-Write-Host "=========================================================" -ForegroundColor Cyan
+set -e
 
-# 1. Install OpenSSH Server if missing
-Write-Host "[INFO] Checking OpenSSH Server capability..." -ForegroundColor Yellow
-$sshCapability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
-if ($sshCapability.State -ne 'Installed') {
-    Write-Host "[ACTION] Installing OpenSSH Server..." -ForegroundColor Yellow
-    Add-WindowsCapability -Online -Name $sshCapability.Name | Out-Null
-    Write-Host "[SUCCESS] OpenSSH Server installed." -ForegroundColor Green
-} else {
-    Write-Host "[SUCCESS] OpenSSH Server is already installed." -ForegroundColor Green
+echo "========================================================="
+echo "  Lab 4: Gateway VM Configuration"
+echo "========================================================="
+
+# 1. Install Dependencies
+echo "[INFO] Checking dependencies..."
+if ! dpkg -l | grep -q openssh-server; then
+    sudo apt update && sudo apt install -y openssh-server
+fi
+if ! dpkg -l | grep -q kea-dhcp4; then
+    sudo apt update && sudo apt install -y kea-dhcp4
+fi
+
+# 2. Configure Netplan
+# enp0s3 = NAT/Bridged (Auto IP), enp0s8 = Internal (Static .1)
+cat > /etc/netplan/99_config.yaml << 'EOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+    enp0s8:
+      addresses:
+        - 192.168.99.1/29
+EOF
+sudo netplan apply
+echo "[SUCCESS] Netplan applied."
+
+# 3. Configure Kea DHCP (Internal Subnet)
+cat > /etc/kea/kea-dhcp4.conf << 'EOF'
+{
+  "Dhcp4": {
+    "interfaces-config": { "interfaces": [ "enp0s8" ] },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/kea-leases4.csv"
+    },
+    "valid-lifetime": 3600,
+    "subnet4": [
+      {
+        "id": 1,
+        "subnet": "192.168.99.0/29",
+        "pools": [ { "pool": "192.168.99.2 - 192.168.99.2" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.99.1" },
+          { "name": "domain-name-servers", "data": "1.1.1.1" }
+        ]
+      }
+    ]
+  }
 }
+EOF
+sudo -u _kea kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+sudo rm -f /var/lib/kea/kea-leases4.csv
+sudo systemctl restart kea-dhcp4-server
+sudo systemctl enable kea-dhcp4-server
+echo "[SUCCESS] Kea DHCP configured for 192.168.99.0/29 -> .2"
 
-# 2. Configure SSH for Password Login
-Write-Host "[ACTION] Configuring SSH for password authentication..." -ForegroundColor Yellow
-Start-Service sshd -ErrorAction SilentlyContinue
-Set-Service -Name sshd -StartupType Automatic
+# 4. Enable IP Forwarding
+sudo sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+sudo sysctl -p
+echo "[SUCCESS] IP Forwarding enabled."
 
-$sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
-if (Test-Path $sshdConfigPath) {
-    $content = Get-Content $sshdConfigPath
-    $content = $content -replace '#PasswordAuthentication yes', 'PasswordAuthentication yes'
-    $content = $content -replace 'PasswordAuthentication no', 'PasswordAuthentication yes'
-    Set-Content $sshdConfigPath $content
-    Restart-Service sshd
-    Write-Host "[SUCCESS] SSH configured and restarted." -ForegroundColor Green
-}
+# 5. Get Host IP for Firewall
+read -p "Enter your Host OS (Physical PC) IP address: " HOST_IP
 
-# 3. Get Host IP
-$HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.0.66)"
-$HostIP | Out-File -FilePath "C:\Lab4_HostIP.txt" -Force
+# 6. Configure Strict Firewall (Nftables)
+sudo nft flush ruleset
+sudo nft add table ip filter
+sudo nft add chain ip filter INPUT '{ type filter hook input priority 0; policy drop; }'
+sudo nft add chain ip filter FORWARD '{ type filter hook forward priority 0; policy accept; }'
+sudo nft add chain ip filter OUTPUT '{ type filter hook output priority 0; policy accept; }'
+sudo nft add rule ip filter INPUT iifname "lo" accept
+sudo nft add rule ip filter INPUT ct state established,related accept
+sudo nft add rule ip filter INPUT iifname "enp0s3" ip saddr "$HOST_IP" tcp dport 22 accept
 
-# 4. Configure Windows Firewall
-Write-Host "[ACTION] Applying STRICT Firewall Rules..." -ForegroundColor Yellow
-Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
-Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+# NAT Masquerade for Internet (Lab 3 continuity)
+sudo nft add table ip nat
+sudo nft add chain ip nat POSTROUTING '{ type nat hook postrouting priority 100; policy accept; }'
+sudo nft add rule ip nat POSTROUTING oifname "enp0s3" counter masquerade
 
-New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
-    -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
-    -RemoteAddress $HostIP -Profile Any | Out-Null
+# 7. Save Rules & Create Boot Hook
+sudo nft list ruleset > /etc/nftables.ruleset
+sudo mkdir -p /etc/networkd-dispatcher/routable.d
+printf '#!/bin/sh\n/usr/sbin/nft --file /etc/nftables.ruleset\nexit 0\n' | sudo tee /etc/networkd-dispatcher/routable.d/50-ifup.hooks > /dev/null
+sudo chmod +x /etc/networkd-dispatcher/routable.d/50-ifup.hooks
+echo "[SUCCESS] Strict firewall saved and made persistent."
 
-New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
-    -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
-    -RemoteAddress $HostIP -Profile Any | Out-Null
-Write-Host "[SUCCESS] Firewall configured: SSH Allowed, Ping Blocked." -ForegroundColor Green
+# 8. Install Persistent Switches (fwon / fwoff)
+mkdir -p /usr/local/bin
+cat > /usr/local/bin/fwon << 'EOF'
+#!/bin/bash
+sudo nft -f /etc/nftables.ruleset
+echo "Firewall is now ON and persistent."
+EOF
+cat > /usr/local/bin/fwoff << 'EOF'
+#!/bin/bash
+sudo nft flush ruleset
+sudo rm -f /etc/nftables.ruleset
+echo "Firewall is now OFF permanently. Reboot will keep it OFF until fwon is run."
+EOF
+chmod +x /usr/local/bin/fwon /usr/local/bin/fwoff
+echo "[SUCCESS] fwon and fwoff commands installed globally."
 
-# 5. Enable IP Forwarding and NAT
-Write-Host "[ACTION] Enabling IP Forwarding and NAT..." -ForegroundColor Yellow
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "IPEnableRouter" -Value 1 -Force
-
-# Install Routing feature if needed for NetNat command
-$routingFeature = Get-WindowsFeature -Name RSAT-RemoteAccess
-if (-not $routingFeature.Installed) {
-    Write-Host "[ACTION] Installing RemoteAccess RSAT tools for NAT..." -ForegroundColor Yellow
-    Install-WindowsFeature -Name RSAT-RemoteAccess -IncludeAllSubFeature | Out-Null
-}
-
-Remove-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
-New-NetNat -Name "LabNAT" -InternalIPInterfaceAddressPrefix "192.168.99.0/29" | Out-Null
-Write-Host "[SUCCESS] IP Routing and NAT enabled." -ForegroundColor Green
-
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  GATEWAY SETUP COMPLETE!" -ForegroundColor Green
-Write-Host "=========================================================" -ForegroundColor Cyan
+echo "========================================================="
+echo "  GATEWAY SETUP COMPLETE"
+echo "  Run 'ssh ubuntu@<Gateway-Bridged-IP>' from your Host"
+echo "========================================================="
