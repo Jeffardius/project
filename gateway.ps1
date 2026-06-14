@@ -14,7 +14,6 @@ if ($sshCapability.State -ne 'Installed') {
     Add-WindowsCapability -Online -Name $sshCapability.Name | Out-Null
 }
 
-# Configure sshd_config only if PasswordAuthentication is not already 'yes'
 $sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
 if (Test-Path $sshdConfigPath) {
     $currentConfig = Get-Content $sshdConfigPath -Raw
@@ -26,7 +25,6 @@ if (Test-Path $sshdConfigPath) {
         Restart-Service sshd
     }
 }
-# Ensure service is running
 if ((Get-Service sshd -ErrorAction SilentlyContinue).Status -ne 'Running') {
     Start-Service sshd
     Set-Service sshd -StartupType Automatic
@@ -65,14 +63,12 @@ $prefix = 29
 $currentIP = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $targetIP }
 if (-not $currentIP) {
     Write-Host "[ACTION] Setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
-    # Remove conflicting IPs in same subnet
     Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "192.168.99.*" } | Remove-NetIPAddress -Confirm:$false
     New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix | Out-Null
 } else {
     Write-Host "[INFO] Static IP already correct on $internalIf" -ForegroundColor Cyan
 }
 
-# Ensure external interface is DHCP
 $extDhcp = Get-NetIPInterface -InterfaceAlias $externalIf | Select-Object -ExpandProperty Dhcp
 if ($extDhcp -ne 'Enabled') {
     Write-Host "[ACTION] Setting external interface $externalIf to DHCP..." -ForegroundColor Yellow
@@ -81,20 +77,41 @@ if ($extDhcp -ne 'Enabled') {
 }
 
 # ----------------------------------------------
-# 5. IP Forwarding & NAT (only if not already configured)
+# 5. IP Forwarding (registry) + Routing service (with reboot warning)
 # ----------------------------------------------
 $routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 $ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
 if ($ipEnableRouter.IPEnableRouter -ne 1) {
-    Write-Host "[ACTION] Enabling IP forwarding..." -ForegroundColor Yellow
+    Write-Host "[ACTION] Enabling IP forwarding in registry..." -ForegroundColor Yellow
     Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
 }
-$ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
-if ($ras.Status -ne 'Running') {
-    Start-Service RemoteAccess
-    Set-Service RemoteAccess -StartupType Automatic
+
+# Ensure Routing feature is installed (required for RemoteAccess service)
+$routingFeature = Get-WindowsFeature -Name Routing
+if (-not $routingFeature.Installed) {
+    Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
+    Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
 }
 
+# Try to start RemoteAccess service; if it fails, set to Automatic and warn for reboot
+$ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
+if ($ras.Status -ne 'Running') {
+    Write-Host "[ACTION] Attempting to start RemoteAccess service..." -ForegroundColor Yellow
+    Set-Service RemoteAccess -StartupType Automatic -ErrorAction SilentlyContinue
+    try {
+        Start-Service RemoteAccess -ErrorAction Stop
+        Write-Host "[INFO] RemoteAccess service started successfully." -ForegroundColor Green
+    } catch {
+        Write-Host "[WARNING] RemoteAccess service could not be started. A reboot is required for NAT to work." -ForegroundColor Red
+        Write-Host "[INFO] The service has been set to start automatically. Please reboot the Gateway VM later." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "[INFO] RemoteAccess service already running." -ForegroundColor Cyan
+}
+
+# ----------------------------------------------
+# 6. NAT (only if missing)
+# ----------------------------------------------
 $natExists = Get-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
 if (-not $natExists) {
     Write-Host "[ACTION] Creating NAT for 192.168.99.0/29..." -ForegroundColor Yellow
@@ -104,23 +121,20 @@ if (-not $natExists) {
 }
 
 # ----------------------------------------------
-# 6. DHCP Server (feature, service, scope)
+# 7. DHCP Server (feature, service, scope)
 # ----------------------------------------------
 $dhcpFeature = Get-WindowsFeature -Name DHCP
 if (-not $dhcpFeature.Installed) {
     Write-Host "[ACTION] Installing DHCP Server feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name DHCP -IncludeManagementTools | Out-Null
 }
-# Ensure service is running & auto-start
 $dhcpSvc = Get-Service DHCPServer -ErrorAction SilentlyContinue
 if ($dhcpSvc.Status -ne 'Running') {
     Start-Service DHCPServer
     Set-Service DHCPServer -StartupType Automatic
 }
-# Authorize DHCP server (idempotent)
 Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
 
-# Create scope for Relay (192.168.99.2) only if missing
 $scopeId = "192.168.99.0"
 $existingScope = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
 if (-not $existingScope) {
@@ -138,7 +152,7 @@ if (-not $existingScope) {
 }
 
 # ----------------------------------------------
-# 7. Firewall rules (only if missing/changed)
+# 8. Firewall rules (only if missing)
 # ----------------------------------------------
 $sshRule = Get-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
 if (-not $sshRule) {
@@ -154,18 +168,16 @@ if (-not $icmpRule) {
         -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
         -RemoteAddress $HostIP -Profile Any | Out-Null
 }
-# Ensure DHCP server inbound rules are enabled (idempotent)
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 8. Create fwon / fwoff shortcuts (only if missing)
+# 9. Create fwon / fwoff shortcuts (only if missing)
 # ----------------------------------------------
 $LabDir = "C:\Lab4"
 if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
 
 $fwonPath = "$LabDir\fwon.ps1"
 if (-not (Test-Path $fwonPath)) {
-    Write-Host "[ACTION] Creating fwon.ps1..." -ForegroundColor Yellow
     $fwonScript = @"
 `$HostIPFile = "C:\Lab4_HostIP.txt"
 if (Test-Path `$HostIPFile) { `$HostIP = Get-Content `$HostIPFile } else { `$HostIP = Read-Host "Enter Host OS IP" ; `$HostIP | Out-File `$HostIPFile -Force }
@@ -179,7 +191,6 @@ Write-Host "Firewall is now ON and persistent." -ForegroundColor Green
 }
 $fwoffPath = "$LabDir\fwoff.ps1"
 if (-not (Test-Path $fwoffPath)) {
-    Write-Host "[ACTION] Creating fwoff.ps1..." -ForegroundColor Yellow
     $fwoffScript = @"
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
 Remove-Item -Path "C:\Lab4_HostIP.txt" -ErrorAction SilentlyContinue
@@ -187,7 +198,6 @@ Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
 "@
     $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8
 }
-# Create .cmd wrappers if missing
 if (-not (Test-Path "C:\Windows\fwon.cmd")) {
     "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '$fwonPath'" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
 }
@@ -199,5 +209,8 @@ Write-Host "=========================================================" -Foregrou
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
 Write-Host "  - External : $externalIf (DHCP)" -ForegroundColor Green
 Write-Host "  - Internal : $internalIf = 192.168.99.1/29" -ForegroundColor Green
-Write-Host "  - NAT active, DHCP ready (assigns 192.168.99.2 to Relay)" -ForegroundColor Green
+Write-Host "  - NAT rule created (will work after RemoteAccess starts)" -ForegroundColor Green
+if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
+    Write-Host "  - [REBOOT REQUIRED] Please restart the Gateway VM for NAT to function." -ForegroundColor Red
+}
 Write-Host "=========================================================" -ForegroundColor Cyan
