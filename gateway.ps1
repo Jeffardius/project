@@ -1,94 +1,88 @@
-#!/bin/bash
-# Lab 3/4 Relay Setup Script (Ubuntu)
-# Requirements: Internal DHCP client, Bridged 192.168.99.80/28, DHCP .82 for Node, Forwarding
+#Requires -RunAsAdministrator
+$ErrorActionPreference = "Stop"
 
-set -e
+Write-Host "=========================================================" -ForegroundColor Cyan
+Write-Host "  Lab 4: Windows Server 2022 Core Gateway Setup" -ForegroundColor Cyan
+Write-Host "=========================================================" -ForegroundColor Cyan
 
-echo "========================================================="
-echo "  Lab 3/4: Relay VM Configuration"
-echo "========================================================="
-
-# 1. Install Dependencies
-echo "[INFO] Checking dependencies..."
-if ! dpkg -l | grep -q kea-dhcp4; then
-    sudo apt update && sudo apt install -y kea-dhcp4
-fi
-
-# 2. Configure Netplan
-# enp0s3 = Internal (DHCP from Gateway), enp0s8 = Bridged (Static .81)
-cat > /etc/netplan/99_config.yaml << 'EOF'
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    enp0s3:
-      dhcp4: true
-      dhcp4-overrides:
-        use-routes: true
-    enp0s8:
-      addresses:
-        - 192.168.99.81/28
-EOF
-sudo netplan apply
-echo "[SUCCESS] Netplan applied."
-
-# 3. Configure Kea DHCP (Bridged Subnet for Node)
-cat > /etc/kea/kea-dhcp4.conf << 'EOF'
-{
-  "Dhcp4": {
-    "interfaces-config": { "interfaces": [ "enp0s8" ] },
-    "lease-database": {
-      "type": "memfile",
-      "persist": true,
-      "name": "/var/lib/kea/kea-leases4.csv"
-    },
-    "valid-lifetime": 3600,
-    "subnet4": [
-      {
-        "id": 2,
-        "subnet": "192.168.99.80/28",
-        "pools": [ { "pool": "192.168.99.82 - 192.168.99.82" } ],
-        "option-data": [
-          { "name": "routers", "data": "192.168.99.81" },
-          { "name": "domain-name-servers", "data": "1.1.1.1" }
-        ]
-      }
-    ]
-  }
+# 1. Install OpenSSH Server if missing
+Write-Host "[INFO] Checking OpenSSH Server capability..." -ForegroundColor Yellow
+$sshCapability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+if ($sshCapability.State -ne 'Installed') {
+    Write-Host "[ACTION] Installing OpenSSH Server..." -ForegroundColor Yellow
+    Add-WindowsCapability -Online -Name $sshCapability.Name | Out-Null
 }
-EOF
-sudo -u _kea kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
-sudo rm -f /var/lib/kea/kea-leases4.csv
-sudo systemctl restart kea-dhcp4-server
-sudo systemctl enable kea-dhcp4-server
-echo "[SUCCESS] Kea DHCP configured for 192.168.99.80/28 -> .82"
 
-# 4. Enable IP Forwarding
-sudo sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-sudo sysctl -p
+Write-Host "[ACTION] Configuring SSH for password authentication..." -ForegroundColor Yellow
+Start-Service sshd -ErrorAction SilentlyContinue
+Set-Service -Name sshd -StartupType Automatic
+$sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
+if (Test-Path $sshdConfigPath) {
+    $content = Get-Content $sshdConfigPath
+    $content = $content -replace '#PasswordAuthentication yes', 'PasswordAuthentication yes'
+    $content = $content -replace 'PasswordAuthentication no', 'PasswordAuthentication yes'
+    Set-Content $sshdConfigPath $content
+    Restart-Service sshd
+}
 
-# 5. Configure Permissive Nftables for Routing
-sudo nft flush ruleset
-sudo nft add table ip filter
-sudo nft add chain ip filter INPUT '{ type filter hook input priority 0; policy accept; }'
-sudo nft add chain ip filter FORWARD '{ type filter hook forward priority 0; policy accept; }'
-sudo nft add chain ip filter OUTPUT '{ type filter hook output priority 0; policy accept; }'
-sudo nft add rule ip filter INPUT iifname "lo" accept
-sudo nft add rule ip filter INPUT ct state established,related accept
+# 2. Get Host IP
+$HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.0.66)"
+$HostIP | Out-File -FilePath "C:\Lab4_HostIP.txt" -Force
 
-# NAT Masquerade toward Gateway (enp0s3)
-sudo nft add table ip nat
-sudo nft add chain ip nat POSTROUTING '{ type nat hook postrouting priority 100; policy accept; }'
-sudo nft add rule ip nat POSTROUTING oifname "enp0s3" counter masquerade
+# 3. Configure Strict Windows Firewall
+Write-Host "[ACTION] Applying STRICT Firewall Rules..." -ForegroundColor Yellow
+Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
 
-# 6. Save Rules & Create Boot Hook
-sudo nft list ruleset > /etc/nftables.ruleset
-sudo mkdir -p /etc/networkd-dispatcher/routable.d
-printf '#!/bin/sh\n/usr/sbin/nft --file /etc/nftables.ruleset\nexit 0\n' | sudo tee /etc/networkd-dispatcher/routable.d/50-ifup.hooks > /dev/null
-sudo chmod +x /etc/networkd-dispatcher/routable.d/50-ifup.hooks
-echo "[SUCCESS] Relay routing and firewall rules saved and persistent."
+New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
+    -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
+    -RemoteAddress $HostIP -Profile Any | Out-Null
 
-echo "========================================================="
-echo "  RELAY SETUP COMPLETE"
-echo "  Node VM (Laptop) should now receive 192.168.99.82"
-echo "========================================================="
+New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
+    -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
+    -RemoteAddress $HostIP -Profile Any | Out-Null
+
+# 4. Enable IP Forwarding and NAT
+Write-Host "[ACTION] Enabling IP Forwarding and NAT for 192.168.99.0/29..." -ForegroundColor Yellow
+$routingFeature = Get-WindowsFeature -Name Routing
+if (-not $routingFeature.Installed) {
+    Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
+    Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
+}
+
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "IPEnableRouter" -Value 1 -Force
+Start-Service RemoteAccess -ErrorAction SilentlyContinue
+
+# Setup Windows NAT for the internal network
+Remove-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
+New-NetNat -Name "LabNAT" -InternalIPInterfaceAddressPrefix "192.168.99.0/29" | Out-Null
+
+# 5. Create Persistent fwon / fwoff Shortcuts
+Write-Host "[ACTION] Installing fwon and fwoff shortcuts..." -ForegroundColor Yellow
+$LabDir = "C:\Lab4"
+if (!(Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
+
+$fwonScript = @'
+$HostIPFile = "C:\Lab4_HostIP.txt"
+if (Test-Path $HostIPFile) { $HostIP = Get-Content $HostIPFile } else { $HostIP = Read-Host "Enter Host OS IP" ; $HostIP | Out-File $HostIPFile -Force }
+Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow -RemoteAddress $HostIP | Out-Null
+New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block -RemoteAddress $HostIP | Out-Null
+Start-Service sshd -ErrorAction SilentlyContinue
+Write-Host "Firewall is now ON and persistent." -ForegroundColor Green
+'@
+$fwonScript | Out-File -FilePath "$LabDir\fwon.ps1" -Encoding utf8
+
+$fwoffScript = @'
+Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+Remove-Item -Path "C:\Lab4_HostIP.txt" -ErrorAction SilentlyContinue
+Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
+'@
+$fwoffScript | Out-File -FilePath "$LabDir\fwoff.ps1" -Encoding utf8
+
+"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Lab4\fwon.ps1'" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
+"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Lab4\fwoff.ps1'" | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
+
+Write-Host "=========================================================" -ForegroundColor Cyan
+Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
+Write-Host "=========================================================" -ForegroundColor Cyan
