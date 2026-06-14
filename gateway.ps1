@@ -6,162 +6,198 @@ Write-Host "  Lab 4: Windows Server 2022 Core Gateway Setup" -ForegroundColor Cy
 Write-Host "=========================================================" -ForegroundColor Cyan
 
 # ----------------------------------------------
-# 1. Install & configure OpenSSH Server
+# 1. OpenSSH Server (only if missing or misconfigured)
 # ----------------------------------------------
-Write-Host "[INFO] Checking OpenSSH Server capability..." -ForegroundColor Yellow
 $sshCapability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
 if ($sshCapability.State -ne 'Installed') {
     Write-Host "[ACTION] Installing OpenSSH Server..." -ForegroundColor Yellow
     Add-WindowsCapability -Online -Name $sshCapability.Name | Out-Null
 }
 
-Write-Host "[ACTION] Configuring SSH for password authentication..." -ForegroundColor Yellow
-Start-Service sshd -ErrorAction SilentlyContinue
-Set-Service -Name sshd -StartupType Automatic
+# Configure sshd_config only if PasswordAuthentication is not already 'yes'
 $sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
 if (Test-Path $sshdConfigPath) {
-    $content = Get-Content $sshdConfigPath
-    $content = $content -replace '#PasswordAuthentication yes', 'PasswordAuthentication yes'
-    $content = $content -replace 'PasswordAuthentication no', 'PasswordAuthentication yes'
-    Set-Content $sshdConfigPath $content
-    Restart-Service sshd
+    $currentConfig = Get-Content $sshdConfigPath -Raw
+    if ($currentConfig -notmatch '^PasswordAuthentication yes' -and $currentConfig -match 'PasswordAuthentication no') {
+        Write-Host "[ACTION] Enabling password authentication in SSH config..." -ForegroundColor Yellow
+        $newConfig = $currentConfig -replace '#PasswordAuthentication yes', 'PasswordAuthentication yes'
+        $newConfig = $newConfig -replace 'PasswordAuthentication no', 'PasswordAuthentication yes'
+        Set-Content $sshdConfigPath $newConfig
+        Restart-Service sshd
+    }
+}
+# Ensure service is running
+if ((Get-Service sshd -ErrorAction SilentlyContinue).Status -ne 'Running') {
+    Start-Service sshd
+    Set-Service sshd -StartupType Automatic
 }
 
 # ----------------------------------------------
-# 2. Get Host IP for firewall restrictions
+# 2. Get Host IP for firewall rules (store for later)
 # ----------------------------------------------
-$HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.0.66)"
-$HostIP | Out-File -FilePath "C:\Lab4_HostIP.txt" -Force
+$hostIPFile = "C:\Lab4_HostIP.txt"
+if (-not (Test-Path $hostIPFile)) {
+    $HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.0.66)"
+    $HostIP | Out-File -FilePath $hostIPFile -Force
+} else {
+    $HostIP = Get-Content $hostIPFile
+    Write-Host "[INFO] Using saved Host IP: $HostIP" -ForegroundColor Cyan
+}
 
 # ----------------------------------------------
-# 3. Automatically pick the internal interface = second "Up" adapter
+# 3. Determine interfaces (internal = second up adapter)
 # ----------------------------------------------
 $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
 if ($adapters.Count -lt 2) {
-    Write-Host "[ERROR] Less than 2 network adapters are Up. Please check your VM network settings." -ForegroundColor Red
+    Write-Host "[ERROR] Less than 2 network adapters are Up. Exiting." -ForegroundColor Red
     exit 1
 }
-$internalIf = $adapters[1].Name   # Second adapter (index 1)
-$externalIf  = $adapters[0].Name  # First adapter
-Write-Host "[INFO] Detected adapters:" -ForegroundColor Yellow
-Write-Host "   External (NAT/Bridged): $externalIf" -ForegroundColor Green
-Write-Host "   Internal (to Relay)    : $internalIf" -ForegroundColor Green
+$internalIf = $adapters[1].Name
+$externalIf  = $adapters[0].Name
+Write-Host "[INFO] External interface: $externalIf (DHCP)" -ForegroundColor Green
+Write-Host "[INFO] Internal interface: $internalIf (will be 192.168.99.1/29)" -ForegroundColor Green
 
 # ----------------------------------------------
-# 4. Configure static IP on internal interface: 192.168.99.1/29
+# 4. Configure static IP on internal interface (only if wrong)
 # ----------------------------------------------
-Write-Host "[ACTION] Setting static IP 192.168.99.1/29 on $internalIf ..." -ForegroundColor Yellow
-# Remove any existing IP in the 192.168.99.x range from this interface
-Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | 
-    Where-Object { $_.IPAddress -like "192.168.99.*" } | 
-    Remove-NetIPAddress -Confirm:$false
-# Set new static IP
-New-NetIPAddress -InterfaceAlias $internalIf -IPAddress 192.168.99.1 -PrefixLength 29 -ErrorAction SilentlyContinue | Out-Null
-
-# Ensure external interface uses DHCP
-Write-Host "[ACTION] Ensuring external interface $externalIf uses DHCP ..." -ForegroundColor Yellow
-Set-NetIPInterface -InterfaceAlias $externalIf -Dhcp Enabled -ErrorAction SilentlyContinue
-ipconfig /renew $externalIf | Out-Null
-
-# ----------------------------------------------
-# 5. Install Routing (NAT & IP forwarding)
-# ----------------------------------------------
-Write-Host "[ACTION] Enabling IP Forwarding and NAT for 192.168.99.0/29 ..." -ForegroundColor Yellow
-$routingFeature = Get-WindowsFeature -Name Routing
-if (-not $routingFeature.Installed) {
-    Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
-    Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
+$targetIP = "192.168.99.1"
+$prefix = 29
+$currentIP = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $targetIP }
+if (-not $currentIP) {
+    Write-Host "[ACTION] Setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
+    # Remove conflicting IPs in same subnet
+    Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "192.168.99.*" } | Remove-NetIPAddress -Confirm:$false
+    New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix | Out-Null
+} else {
+    Write-Host "[INFO] Static IP already correct on $internalIf" -ForegroundColor Cyan
 }
 
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "IPEnableRouter" -Value 1 -Force
-Start-Service RemoteAccess -ErrorAction SilentlyContinue
-
-# Remove existing NAT and recreate for the internal subnet
-Remove-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
-New-NetNat -Name "LabNAT" -InternalIPInterfaceAddressPrefix "192.168.99.0/29" | Out-Null
+# Ensure external interface is DHCP
+$extDhcp = Get-NetIPInterface -InterfaceAlias $externalIf | Select-Object -ExpandProperty Dhcp
+if ($extDhcp -ne 'Enabled') {
+    Write-Host "[ACTION] Setting external interface $externalIf to DHCP..." -ForegroundColor Yellow
+    Set-NetIPInterface -InterfaceAlias $externalIf -Dhcp Enabled
+    ipconfig /renew $externalIf | Out-Null
+}
 
 # ----------------------------------------------
-# 6. Install & configure DHCP Server for Relay
+# 5. IP Forwarding & NAT (only if not already configured)
 # ----------------------------------------------
-Write-Host "[ACTION] Installing DHCP Server role..." -ForegroundColor Yellow
+$routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+$ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
+if ($ipEnableRouter.IPEnableRouter -ne 1) {
+    Write-Host "[ACTION] Enabling IP forwarding..." -ForegroundColor Yellow
+    Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
+}
+$ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
+if ($ras.Status -ne 'Running') {
+    Start-Service RemoteAccess
+    Set-Service RemoteAccess -StartupType Automatic
+}
+
+$natExists = Get-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
+if (-not $natExists) {
+    Write-Host "[ACTION] Creating NAT for 192.168.99.0/29..." -ForegroundColor Yellow
+    New-NetNat -Name "LabNAT" -InternalIPInterfaceAddressPrefix "192.168.99.0/29" | Out-Null
+} else {
+    Write-Host "[INFO] NAT 'LabNAT' already exists." -ForegroundColor Cyan
+}
+
+# ----------------------------------------------
+# 6. DHCP Server (feature, service, scope)
+# ----------------------------------------------
 $dhcpFeature = Get-WindowsFeature -Name DHCP
 if (-not $dhcpFeature.Installed) {
+    Write-Host "[ACTION] Installing DHCP Server feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name DHCP -IncludeManagementTools | Out-Null
 }
-
-# Ensure service is running
-Start-Service DHCPServer -ErrorAction SilentlyContinue
-Set-Service DHCPServer -StartupType Automatic
-
-# Authorize DHCP server (required even in workgroup)
+# Ensure service is running & auto-start
+$dhcpSvc = Get-Service DHCPServer -ErrorAction SilentlyContinue
+if ($dhcpSvc.Status -ne 'Running') {
+    Start-Service DHCPServer
+    Set-Service DHCPServer -StartupType Automatic
+}
+# Authorize DHCP server (idempotent)
 Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
 
-# Remove old scope if exists, then create new one that gives exactly 192.168.99.2
-$scopeName = "RelayScope"
-$existingScope = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $scopeName }
-if ($existingScope) {
-    Remove-DhcpServerv4Scope -ScopeId $existingScope.ScopeId -Force -ErrorAction SilentlyContinue
+# Create scope for Relay (192.168.99.2) only if missing
+$scopeId = "192.168.99.0"
+$existingScope = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
+if (-not $existingScope) {
+    Write-Host "[ACTION] Creating DHCP scope for Relay (assigns 192.168.99.2)..." -ForegroundColor Yellow
+    Add-DhcpServerv4Scope -Name "RelayScope" `
+        -StartRange 192.168.99.2 `
+        -EndRange 192.168.99.2 `
+        -SubnetMask 255.255.255.248 `
+        -State Active | Out-Null
+    Set-DhcpServerv4OptionValue -ScopeId $scopeId `
+        -Router 192.168.99.1 `
+        -DnsServer 1.1.1.1, 8.8.8.8 | Out-Null
+} else {
+    Write-Host "[INFO] DHCP scope for 192.168.99.0/29 already exists." -ForegroundColor Cyan
 }
-Add-DhcpServerv4Scope -Name $scopeName `
-    -StartRange 192.168.99.2 `
-    -EndRange 192.168.99.2 `
-    -SubnetMask 255.255.255.248 `
-    -State Active | Out-Null
-
-# Set DHCP options: default gateway = 192.168.99.1, DNS = 1.1.1.1, 8.8.8.8
-Set-DhcpServerv4OptionValue -ScopeId 192.168.99.0 `
-    -Router 192.168.99.1 `
-    -DnsServer 1.1.1.1, 8.8.8.8 -ErrorAction SilentlyContinue | Out-Null
 
 # ----------------------------------------------
-# 7. Firewall rules (SSH from host, block ICMP from host, allow DHCP)
+# 7. Firewall rules (only if missing/changed)
 # ----------------------------------------------
-Write-Host "[ACTION] Configuring firewall rules..." -ForegroundColor Yellow
-Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
-
-New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
-    -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
-    -RemoteAddress $HostIP -Profile Any | Out-Null
-
-New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
-    -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
-    -RemoteAddress $HostIP -Profile Any | Out-Null
-
-# Ensure DHCP server firewall rules are enabled
+$sshRule = Get-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
+if (-not $sshRule) {
+    Write-Host "[ACTION] Creating firewall rule: allow SSH from host..." -ForegroundColor Yellow
+    New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
+        -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
+        -RemoteAddress $HostIP -Profile Any | Out-Null
+}
+$icmpRule = Get-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+if (-not $icmpRule) {
+    Write-Host "[ACTION] Creating firewall rule: block ICMP from host..." -ForegroundColor Yellow
+    New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
+        -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
+        -RemoteAddress $HostIP -Profile Any | Out-Null
+}
+# Ensure DHCP server inbound rules are enabled (idempotent)
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 8. Create persistent fwon / fwoff shortcuts (manage SSH/ICMP rules)
+# 8. Create fwon / fwoff shortcuts (only if missing)
 # ----------------------------------------------
-Write-Host "[ACTION] Installing fwon and fwoff shortcuts..." -ForegroundColor Yellow
 $LabDir = "C:\Lab4"
-if (!(Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
+if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
 
-$fwonScript = @'
-$HostIPFile = "C:\Lab4_HostIP.txt"
-if (Test-Path $HostIPFile) { $HostIP = Get-Content $HostIPFile } else { $HostIP = Read-Host "Enter Host OS IP" ; $HostIP | Out-File $HostIPFile -Force }
+$fwonPath = "$LabDir\fwon.ps1"
+if (-not (Test-Path $fwonPath)) {
+    Write-Host "[ACTION] Creating fwon.ps1..." -ForegroundColor Yellow
+    $fwonScript = @"
+`$HostIPFile = "C:\Lab4_HostIP.txt"
+if (Test-Path `$HostIPFile) { `$HostIP = Get-Content `$HostIPFile } else { `$HostIP = Read-Host "Enter Host OS IP" ; `$HostIP | Out-File `$HostIPFile -Force }
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow -RemoteAddress $HostIP | Out-Null
-New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block -RemoteAddress $HostIP | Out-Null
+New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow -RemoteAddress `$HostIP | Out-Null
+New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block -RemoteAddress `$HostIP | Out-Null
 Start-Service sshd -ErrorAction SilentlyContinue
 Write-Host "Firewall is now ON and persistent." -ForegroundColor Green
-'@
-$fwonScript | Out-File -FilePath "$LabDir\fwon.ps1" -Encoding utf8
-
-$fwoffScript = @'
+"@
+    $fwonScript | Out-File -FilePath $fwonPath -Encoding utf8
+}
+$fwoffPath = "$LabDir\fwoff.ps1"
+if (-not (Test-Path $fwoffPath)) {
+    Write-Host "[ACTION] Creating fwoff.ps1..." -ForegroundColor Yellow
+    $fwoffScript = @"
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
 Remove-Item -Path "C:\Lab4_HostIP.txt" -ErrorAction SilentlyContinue
 Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
-'@
-$fwoffScript | Out-File -FilePath "$LabDir\fwoff.ps1" -Encoding utf8
-
-"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Lab4\fwon.ps1'" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
-"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Lab4\fwoff.ps1'" | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
+"@
+    $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8
+}
+# Create .cmd wrappers if missing
+if (-not (Test-Path "C:\Windows\fwon.cmd")) {
+    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '$fwonPath'" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
+}
+if (-not (Test-Path "C:\Windows\fwoff.cmd")) {
+    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '$fwoffPath'" | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
+}
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
-Write-Host "  - External interface : $externalIf (DHCP)" -ForegroundColor Green
-Write-Host "  - Internal interface : $internalIf = 192.168.99.1/29" -ForegroundColor Green
-Write-Host "  - DHCP active: Relay will receive 192.168.99.2" -ForegroundColor Green
-Write-Host "  - NAT enabled for 192.168.99.0/29" -ForegroundColor Green
+Write-Host "  - External : $externalIf (DHCP)" -ForegroundColor Green
+Write-Host "  - Internal : $internalIf = 192.168.99.1/29" -ForegroundColor Green
+Write-Host "  - NAT active, DHCP ready (assigns 192.168.99.2 to Relay)" -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Cyan
