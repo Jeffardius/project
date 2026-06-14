@@ -78,7 +78,7 @@ if ($extDhcp -ne 'Enabled') {
 # 5. IP Forwarding & Routing
 $routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 $ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
-if ($ipEnableRouter.IPEnableRouter -ne 1) {
+if (-not $ipEnableRouter -or $ipEnableRouter.IPEnableRouter -ne 1) {
     Write-Host "[ACTION] Enabling IP forwarding in registry..." -ForegroundColor Yellow
     Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
 }
@@ -88,7 +88,7 @@ if (-not $routingFeature.Installed) {
     Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
 }
 $ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
-if ($ras.Status -ne 'Running') {
+if (-not $ras -or $ras.Status -ne 'Running') {
     Write-Host "[ACTION] Attempting to start RemoteAccess service..." -ForegroundColor Yellow
     Set-Service RemoteAccess -StartupType Automatic -ErrorAction SilentlyContinue
     try {
@@ -118,9 +118,11 @@ if (-not $dhcpFeature.Installed) {
     Install-WindowsFeature -Name DHCP -IncludeManagementTools | Out-Null
 }
 $dhcpSvc = Get-Service DHCPServer -ErrorAction SilentlyContinue
-if ($dhcpSvc.Status -ne 'Running') {
-    Start-Service DHCPServer
-    Set-Service DHCPServer -StartupType Automatic
+if (-not $dhcpSvc -or $dhcpSvc.Status -ne 'Running') {
+    if ($dhcpSvc) {
+        Start-Service DHCPServer
+        Set-Service DHCPServer -StartupType Automatic
+    }
 }
 $domainStatus = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
 if ($domainStatus) {
@@ -210,8 +212,12 @@ $fwoffCmd = "C:\Windows\fwoff.cmd"
 Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $fwoffCmd -Force -ErrorAction SilentlyContinue
 
-"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`"" | Out-File -FilePath $fwonCmd -Encoding ascii
-"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`"" | Out-File -FilePath $fwoffCmd -Encoding ascii
+# Fixed: Use proper escaping for CMD files
+$fwonCmdContent = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`""
+$fwoffCmdContent = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`""
+
+$fwonCmdContent | Out-File -FilePath $fwonCmd -Encoding ascii -Force
+$fwoffCmdContent | Out-File -FilePath $fwoffCmd -Encoding ascii -Force
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
