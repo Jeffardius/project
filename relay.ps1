@@ -100,7 +100,7 @@ if ($dhcpSvc.Status -ne 'Running') {
 }
 
 # Authorize DHCP server only if domain-joined (otherwise ignore)
-$domainStatus = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+$domainStatus = (Get-CimInstance Win32_ComputerSystem).PartOfDomain
 if ($domainStatus) {
     Write-Host "[INFO] Domain-joined – authorizing DHCP server..." -ForegroundColor Yellow
     Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
