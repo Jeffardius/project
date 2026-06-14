@@ -8,8 +8,8 @@ Write-Host "=========================================================" -Foregrou
 # ----------------------------------------------
 # 1. Hardcoded interface names (no prompts, no auto-detection)
 # ----------------------------------------------
-$internalIf = "eth1"   # Facing Gateway (receives DHCP from Gateway)
-$bridgedIf  = "eth2"   # Facing Node (static IP, DHCP server for Node)
+$internalIf = "Ethernet"   # Facing Gateway (has 192.168.99.2)
+$bridgedIf  = "Ethernet 2" # Facing Node (has 192.168.99.81)
 
 # Verify both interfaces exist and are up
 $eth1 = Get-NetAdapter -Name $internalIf -ErrorAction SilentlyContinue
