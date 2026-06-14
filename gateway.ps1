@@ -6,7 +6,7 @@ Write-Host "  Lab 4: Windows Server 2022 Core Gateway Setup" -ForegroundColor Cy
 Write-Host "=========================================================" -ForegroundColor Cyan
 
 # ----------------------------------------------
-# 1. Install & configure OpenSSH Server (optional but convenient)
+# 1. Install & configure OpenSSH Server
 # ----------------------------------------------
 Write-Host "[INFO] Checking OpenSSH Server capability..." -ForegroundColor Yellow
 $sshCapability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
@@ -34,26 +34,34 @@ $HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.
 $HostIP | Out-File -FilePath "C:\Lab4_HostIP.txt" -Force
 
 # ----------------------------------------------
-# 3. Identify internal interface (facing Relay)
+# 3. Automatically pick the internal interface = second "Up" adapter
 # ----------------------------------------------
-Write-Host "[INFO] Available network adapters:" -ForegroundColor Yellow
-Get-NetAdapter | Where-Object Status -eq 'Up' | Format-Table Name, InterfaceDescription, Status
-$internalIf = Read-Host "Enter the NAME of the internal interface (facing the Relay VM, e.g., 'Ethernet 2')"
+$adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+if ($adapters.Count -lt 2) {
+    Write-Host "[ERROR] Less than 2 network adapters are Up. Please check your VM network settings." -ForegroundColor Red
+    exit 1
+}
+$internalIf = $adapters[1].Name   # Second adapter (index 1)
+$externalIf  = $adapters[0].Name  # First adapter
+Write-Host "[INFO] Detected adapters:" -ForegroundColor Yellow
+Write-Host "   External (NAT/Bridged): $externalIf" -ForegroundColor Green
+Write-Host "   Internal (to Relay)    : $internalIf" -ForegroundColor Green
 
 # ----------------------------------------------
 # 4. Configure static IP on internal interface: 192.168.99.1/29
 # ----------------------------------------------
 Write-Host "[ACTION] Setting static IP 192.168.99.1/29 on $internalIf ..." -ForegroundColor Yellow
-# Remove any existing IP in the same subnet
-Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "192.168.99.*" } | Remove-NetIPAddress -Confirm:$false
+# Remove any existing IP in the 192.168.99.x range from this interface
+Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | 
+    Where-Object { $_.IPAddress -like "192.168.99.*" } | 
+    Remove-NetIPAddress -Confirm:$false
+# Set new static IP
 New-NetIPAddress -InterfaceAlias $internalIf -IPAddress 192.168.99.1 -PrefixLength 29 -ErrorAction SilentlyContinue | Out-Null
 
-# Ensure the external (NAT/bridged) interface uses DHCP
-$externalIf = (Get-NetAdapter | Where-Object { $_.Name -ne $internalIf -and $_.Status -eq 'Up' }).Name
-if ($externalIf) {
-    Set-NetIPInterface -InterfaceAlias $externalIf -Dhcp Enabled -ErrorAction SilentlyContinue
-    ipconfig /renew $externalIf | Out-Null
-}
+# Ensure external interface uses DHCP
+Write-Host "[ACTION] Ensuring external interface $externalIf uses DHCP ..." -ForegroundColor Yellow
+Set-NetIPInterface -InterfaceAlias $externalIf -Dhcp Enabled -ErrorAction SilentlyContinue
+ipconfig /renew $externalIf | Out-Null
 
 # ----------------------------------------------
 # 5. Install Routing (NAT & IP forwarding)
@@ -88,11 +96,11 @@ Set-Service DHCPServer -StartupType Automatic
 # Authorize DHCP server (required even in workgroup)
 Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
 
-# Create scope that gives exactly 192.168.99.2 to the Relay
+# Remove old scope if exists, then create new one that gives exactly 192.168.99.2
 $scopeName = "RelayScope"
-$scope = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $scopeName }
-if ($scope) {
-    Remove-DhcpServerv4Scope -ScopeId $scope.ScopeId -Force -ErrorAction SilentlyContinue
+$existingScope = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $scopeName }
+if ($existingScope) {
+    Remove-DhcpServerv4Scope -ScopeId $existingScope.ScopeId -Force -ErrorAction SilentlyContinue
 }
 Add-DhcpServerv4Scope -Name $scopeName `
     -StartRange 192.168.99.2 `
@@ -119,7 +127,7 @@ New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
     -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
     -RemoteAddress $HostIP -Profile Any | Out-Null
 
-# DHCP server already creates its own inbound rules (UDP 67). Optionally ensure they are enabled:
+# Ensure DHCP server firewall rules are enabled
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
@@ -152,7 +160,8 @@ $fwoffScript | Out-File -FilePath "$LabDir\fwoff.ps1" -Encoding utf8
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
-Write-Host "  - Internal interface: 192.168.99.1/29" -ForegroundColor Green
+Write-Host "  - External interface : $externalIf (DHCP)" -ForegroundColor Green
+Write-Host "  - Internal interface : $internalIf = 192.168.99.1/29" -ForegroundColor Green
 Write-Host "  - DHCP active: Relay will receive 192.168.99.2" -ForegroundColor Green
 Write-Host "  - NAT enabled for 192.168.99.0/29" -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Cyan
