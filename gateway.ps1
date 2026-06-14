@@ -5,9 +5,7 @@ Write-Host "=========================================================" -Foregrou
 Write-Host "  Lab 4: Windows Server 2022 Core Gateway Setup" -ForegroundColor Cyan
 Write-Host "=========================================================" -ForegroundColor Cyan
 
-# ----------------------------------------------
-# 1. OpenSSH Server (only if missing or misconfigured)
-# ----------------------------------------------
+# 1. OpenSSH Server
 $sshCapability = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
 if ($sshCapability.State -ne 'Installed') {
     Write-Host "[ACTION] Installing OpenSSH Server..." -ForegroundColor Yellow
@@ -30,9 +28,7 @@ if ((Get-Service sshd -ErrorAction SilentlyContinue).Status -ne 'Running') {
     Set-Service sshd -StartupType Automatic
 }
 
-# ----------------------------------------------
-# 2. Get Host IP for firewall rules (store for later)
-# ----------------------------------------------
+# 2. Get Host IP
 $hostIPFile = "C:\Lab4_HostIP.txt"
 if (-not (Test-Path $hostIPFile)) {
     $HostIP = Read-Host "Enter your Host OS (Physical PC) IP address (e.g., 192.168.0.66)"
@@ -42,9 +38,7 @@ if (-not (Test-Path $hostIPFile)) {
     Write-Host "[INFO] Using saved Host IP: $HostIP" -ForegroundColor Cyan
 }
 
-# ----------------------------------------------
 # 3. Determine interfaces (internal = second up adapter)
-# ----------------------------------------------
 $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
 if ($adapters.Count -lt 2) {
     Write-Host "[ERROR] Less than 2 network adapters are Up. Exiting." -ForegroundColor Red
@@ -55,18 +49,11 @@ $externalIf  = $adapters[0].Name
 Write-Host "[INFO] External interface: $externalIf (DHCP)" -ForegroundColor Green
 Write-Host "[INFO] Internal interface: $internalIf (will be 192.168.99.1/29)" -ForegroundColor Green
 
-# ----------------------------------------------
-# 4. Configure static IP on internal interface (FORCEFULLY)
-# ----------------------------------------------
+# 4. Configure static IP on internal interface (forcefully)
 $targetIP = "192.168.99.1"
 $prefix = 29
-
 Write-Host "[ACTION] Setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
-
-# Remove any existing IPv4 address on this interface (prevents conflicts)
 Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false
-
-# Set the new static IP
 try {
     New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix -ErrorAction Stop | Out-Null
     Write-Host "[INFO] Static IP assigned successfully." -ForegroundColor Green
@@ -74,8 +61,6 @@ try {
     Write-Host "[ERROR] Failed to set static IP: $_" -ForegroundColor Red
     exit 1
 }
-
-# Verify the IP was applied correctly
 $verify = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -eq $targetIP }
 if (-not $verify) {
     Write-Host "[ERROR] Verification failed – IP not set correctly." -ForegroundColor Red
@@ -83,8 +68,6 @@ if (-not $verify) {
 } else {
     Write-Host "[INFO] Verification passed: $targetIP/$prefix on $internalIf" -ForegroundColor Green
 }
-
-# Ensure external interface uses DHCP
 $extDhcp = Get-NetIPInterface -InterfaceAlias $externalIf | Select-Object -ExpandProperty Dhcp
 if ($extDhcp -ne 'Enabled') {
     Write-Host "[ACTION] Setting external interface $externalIf to DHCP..." -ForegroundColor Yellow
@@ -92,22 +75,18 @@ if ($extDhcp -ne 'Enabled') {
     ipconfig /renew $externalIf | Out-Null
 }
 
-# ----------------------------------------------
-# 5. IP Forwarding (registry) + Routing service
-# ----------------------------------------------
+# 5. IP Forwarding & Routing
 $routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 $ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
 if ($ipEnableRouter.IPEnableRouter -ne 1) {
     Write-Host "[ACTION] Enabling IP forwarding in registry..." -ForegroundColor Yellow
     Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
 }
-
 $routingFeature = Get-WindowsFeature -Name Routing
 if (-not $routingFeature.Installed) {
     Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
 }
-
 $ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
 if ($ras.Status -ne 'Running') {
     Write-Host "[ACTION] Attempting to start RemoteAccess service..." -ForegroundColor Yellow
@@ -123,9 +102,7 @@ if ($ras.Status -ne 'Running') {
     Write-Host "[INFO] RemoteAccess service already running." -ForegroundColor Cyan
 }
 
-# ----------------------------------------------
-# 6. NAT (only if missing)
-# ----------------------------------------------
+# 6. NAT
 $natExists = Get-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
 if (-not $natExists) {
     Write-Host "[ACTION] Creating NAT for 192.168.99.0/29..." -ForegroundColor Yellow
@@ -134,9 +111,7 @@ if (-not $natExists) {
     Write-Host "[INFO] NAT 'LabNAT' already exists." -ForegroundColor Cyan
 }
 
-# ----------------------------------------------
-# 7. DHCP Server (feature, service, scope)
-# ----------------------------------------------
+# 7. DHCP Server
 $dhcpFeature = Get-WindowsFeature -Name DHCP
 if (-not $dhcpFeature.Installed) {
     Write-Host "[ACTION] Installing DHCP Server feature..." -ForegroundColor Yellow
@@ -147,8 +122,6 @@ if ($dhcpSvc.Status -ne 'Running') {
     Start-Service DHCPServer
     Set-Service DHCPServer -StartupType Automatic
 }
-
-# Authorize DHCP server only if domain-joined (otherwise ignore)
 $domainStatus = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
 if ($domainStatus) {
     Write-Host "[INFO] Domain-joined – authorizing DHCP server..." -ForegroundColor Yellow
@@ -156,7 +129,6 @@ if ($domainStatus) {
 } else {
     Write-Host "[INFO] Workgroup environment – DHCP authorization skipped (not required)." -ForegroundColor Cyan
 }
-
 $scopeId = "192.168.99.0"
 $existingScope = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
 if (-not $existingScope) {
@@ -173,9 +145,7 @@ if (-not $existingScope) {
     Write-Host "[INFO] DHCP scope for 192.168.99.0/29 already exists." -ForegroundColor Cyan
 }
 
-# ----------------------------------------------
-# 8. Firewall rules (only if missing)
-# ----------------------------------------------
+# 8. Firewall rules
 $sshRule = Get-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
 if (-not $sshRule) {
     Write-Host "[ACTION] Creating firewall rule: allow SSH from host..." -ForegroundColor Yellow
@@ -192,9 +162,7 @@ if (-not $icmpRule) {
 }
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
-# ----------------------------------------------
-# 9. Create fwon / fwoff shortcuts (ALWAYS recreate)
-# ----------------------------------------------
+# 9. Create fwon / fwoff shortcuts (always recreate)
 $LabDir = "C:\Lab4"
 if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir -Force | Out-Null }
 
@@ -203,7 +171,7 @@ $fwoffPath = "$LabDir\fwoff.ps1"
 
 Write-Host "[ACTION] Creating/updating fwon.ps1 and fwoff.ps1..." -ForegroundColor Yellow
 
-# fwon.ps1 content
+# Use here-strings properly
 $fwonScript = @'
 $HostIPFile = "C:\Lab4_HostIP.txt"
 if (Test-Path $HostIPFile) {
@@ -212,25 +180,19 @@ if (Test-Path $HostIPFile) {
     $HostIP = Read-Host "Enter your Host OS IP address"
     $HostIP | Out-File $HostIPFile -Force
 }
-
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
-
 Disable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbound -ErrorAction SilentlyContinue
-
 New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
     -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
     -RemoteAddress $HostIP -Profile Any | Out-Null
-
 New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
     -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
     -RemoteAddress $HostIP -Profile Any | Out-Null
-
 Start-Service sshd -ErrorAction SilentlyContinue
 Write-Host "Firewall ON: SSH allowed (only from $HostIP), ICMP blocked (only from $HostIP)." -ForegroundColor Green
 '@
 
-# fwoff.ps1 content
 $fwoffScript = @'
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
@@ -238,22 +200,18 @@ Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbou
 Write-Host "Firewall OFF: Custom rules removed. Default ICMP echo rule enabled (ping allowed)." -ForegroundColor Green
 '@
 
-# Write the scripts (force overwrite)
-Set-Content -Path $fwonPath -Value $fwonScript -Encoding UTF8 -Force
-Set-Content -Path $fwoffPath -Value $fwoffScript -Encoding UTF8 -Force
+# Write the script files
+$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
+$fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8 -Force
 
-# Create .cmd wrappers with double quotes (recreate every time)
+# Create .cmd wrappers (recreate every time)
 $fwonCmd = "C:\Windows\fwon.cmd"
 $fwoffCmd = "C:\Windows\fwoff.cmd"
-
 Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
 Remove-Item -Path $fwoffCmd -Force -ErrorAction SilentlyContinue
 
-$fwonCmdContent = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`""
-$fwoffCmdContent = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`""
-
-Set-Content -Path $fwonCmd -Value $fwonCmdContent -Encoding ASCII -Force
-Set-Content -Path $fwoffCmd -Value $fwoffCmdContent -Encoding ASCII -Force
+"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`"" | Out-File -FilePath $fwonCmd -Encoding ascii
+"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`"" | Out-File -FilePath $fwoffCmd -Encoding ascii
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
