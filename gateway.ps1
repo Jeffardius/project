@@ -177,7 +177,7 @@ if (-not $icmpRule) {
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 9. Create fwon / fwoff shortcuts (only if missing)
+# 9. Create fwon / fwoff shortcuts (only if missing, using double quotes)
 # ----------------------------------------------
 $LabDir = "C:\Lab4"
 if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
@@ -204,11 +204,13 @@ Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
 "@
     $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8
 }
+
+# Create .cmd wrappers with DOUBLE QUOTES (fixed)
 if (-not (Test-Path "C:\Windows\fwon.cmd")) {
-    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '$fwonPath'" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
+    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`"" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
 }
 if (-not (Test-Path "C:\Windows\fwoff.cmd")) {
-    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File '$fwoffPath'" | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
+    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`"" | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
 }
 
 Write-Host "=========================================================" -ForegroundColor Cyan
