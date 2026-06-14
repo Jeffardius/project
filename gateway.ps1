@@ -70,8 +70,11 @@ Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction Si
 # Now add the desired static IP
 New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix | Out-Null
 
-# Ensure interface is up
-Set-NetAdapter -Name $internalIf -Status Up -ErrorAction SilentlyContinue
+# Ensure interface is up (enable it if disabled)
+if ((Get-NetAdapter -Name $internalIf).Status -ne 'Up') {
+    Write-Host "[ACTION] Enabling adapter $internalIf ..." -ForegroundColor Yellow
+    Enable-NetAdapter -Name $internalIf -ErrorAction SilentlyContinue
+}
 
 # Verify
 $check = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -eq $targetIP }
