@@ -51,7 +51,7 @@ if ($dhcpStatus -ne 'Enabled') {
 }
 
 # ----------------------------------------------
-# 4. IP Forwarding (registry) + Routing service (with reboot warning)
+# 4. IP Forwarding (registry) + Routing service
 # ----------------------------------------------
 $routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 $ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
@@ -60,14 +60,12 @@ if ($ipEnableRouter.IPEnableRouter -ne 1) {
     Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
 }
 
-# Ensure Routing feature is installed (required for RemoteAccess service)
 $routingFeature = Get-WindowsFeature -Name Routing
 if (-not $routingFeature.Installed) {
     Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
 }
 
-# Try to start RemoteAccess service; if it fails, set to Automatic and warn for reboot
 $ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
 if ($ras.Status -ne 'Running') {
     Write-Host "[ACTION] Attempting to start RemoteAccess service..." -ForegroundColor Yellow
@@ -76,7 +74,7 @@ if ($ras.Status -ne 'Running') {
         Start-Service RemoteAccess -ErrorAction Stop
         Write-Host "[INFO] RemoteAccess service started successfully." -ForegroundColor Green
     } catch {
-        Write-Host "[WARNING] RemoteAccess service could not be started. A reboot is required for routing to work." -ForegroundColor Red
+        Write-Host "[WARNING] RemoteAccess service could not be started. A reboot may be required for routing to work." -ForegroundColor Red
         Write-Host "[INFO] The service has been set to start automatically. Please reboot the Relay VM later." -ForegroundColor Yellow
     }
 } else {
@@ -96,7 +94,15 @@ if ($dhcpSvc.Status -ne 'Running') {
     Start-Service DHCPServer
     Set-Service DHCPServer -StartupType Automatic
 }
-Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
+
+# Authorize DHCP server only if domain-joined (otherwise ignore)
+$domainStatus = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+if ($domainStatus) {
+    Write-Host "[INFO] Domain-joined – authorizing DHCP server..." -ForegroundColor Yellow
+    Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
+} else {
+    Write-Host "[INFO] Workgroup environment – DHCP authorization skipped (not required)." -ForegroundColor Cyan
+}
 
 $nodeScopeId = "192.168.99.80"
 $existingScope = Get-DhcpServerv4Scope -ScopeId $nodeScopeId -ErrorAction SilentlyContinue
@@ -122,6 +128,6 @@ Write-Host "  - Internal ($internalIf) : should have 192.168.99.2 (from Gateway 
 Write-Host "  - Bridged ($bridgedIf)   : static 192.168.99.81/28" -ForegroundColor Green
 Write-Host "  - DHCP server for Node ready (assigns 192.168.99.82)" -ForegroundColor Green
 if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
-    Write-Host "  - [REBOOT REQUIRED] Please restart the Relay VM for routing to function." -ForegroundColor Red
+    Write-Host "  - [REBOOT RECOMMENDED] Please restart the Relay VM for routing to function." -ForegroundColor Red
 }
 Write-Host "=========================================================" -ForegroundColor Cyan
