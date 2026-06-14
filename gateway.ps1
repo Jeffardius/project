@@ -177,14 +177,18 @@ if (-not $icmpRule) {
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 9. Create fwon / fwoff shortcuts (only if missing, using double quotes)
+# 9. Create fwon / fwoff shortcuts (ALWAYS recreate them)
 # ----------------------------------------------
 $LabDir = "C:\Lab4"
 if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
 
 $fwonPath = "$LabDir\fwon.ps1"
-if (-not (Test-Path $fwonPath)) {
-    $fwonScript = @"
+$fwoffPath = "$LabDir\fwoff.ps1"
+
+# Always recreate the PowerShell scripts (overwrite)
+Write-Host "[ACTION] Creating/updating fwon.ps1 and fwoff.ps1..." -ForegroundColor Yellow
+
+$fwonScript = @"
 `$HostIPFile = "C:\Lab4_HostIP.txt"
 if (Test-Path `$HostIPFile) { `$HostIP = Get-Content `$HostIPFile } else { `$HostIP = Read-Host "Enter Host OS IP" ; `$HostIP | Out-File `$HostIPFile -Force }
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
@@ -193,25 +197,23 @@ New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -Direction Inbound -Prot
 Start-Service sshd -ErrorAction SilentlyContinue
 Write-Host "Firewall is now ON and persistent." -ForegroundColor Green
 "@
-    $fwonScript | Out-File -FilePath $fwonPath -Encoding utf8
-}
-$fwoffPath = "$LabDir\fwoff.ps1"
-if (-not (Test-Path $fwoffPath)) {
-    $fwoffScript = @"
+$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
+
+$fwoffScript = @"
 Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
 Remove-Item -Path "C:\Lab4_HostIP.txt" -ErrorAction SilentlyContinue
 Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
 "@
-    $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8
-}
+$fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8 -Force
 
-# Create .cmd wrappers with DOUBLE QUOTES (fixed)
-if (-not (Test-Path "C:\Windows\fwon.cmd")) {
-    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`"" | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
-}
-if (-not (Test-Path "C:\Windows\fwoff.cmd")) {
-    "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`"" | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
-}
+# Always recreate the .cmd wrappers (delete existing then create new)
+$fwonCmd = "C:\Windows\fwon.cmd"
+$fwoffCmd = "C:\Windows\fwoff.cmd"
+Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
+Remove-Item -Path $fwoffCmd -Force -ErrorAction SilentlyContinue
+
+"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwonPath`"" | Out-File -FilePath $fwonCmd -Encoding ascii
+"@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$fwoffPath`"" | Out-File -FilePath $fwoffCmd -Encoding ascii
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
@@ -221,4 +223,5 @@ Write-Host "  - NAT rule created (will work after RemoteAccess starts)" -Foregro
 if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
     Write-Host "  - [REBOOT RECOMMENDED] Please restart the Gateway VM for NAT to function." -ForegroundColor Red
 }
+Write-Host "  - Shortcuts 'fwon' and 'fwoff' are now available (persistent firewall toggle)." -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Cyan
