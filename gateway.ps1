@@ -56,19 +56,35 @@ Write-Host "[INFO] External interface: $externalIf (DHCP)" -ForegroundColor Gree
 Write-Host "[INFO] Internal interface: $internalIf (will be 192.168.99.1/29)" -ForegroundColor Green
 
 # ----------------------------------------------
-# 4. Configure static IP on internal interface (only if wrong)
+# 4. Configure static IP on internal interface (FORCEFULLY)
 # ----------------------------------------------
 $targetIP = "192.168.99.1"
 $prefix = 29
-$currentIP = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $targetIP }
-if (-not $currentIP) {
-    Write-Host "[ACTION] Setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
-    Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "192.168.99.*" } | Remove-NetIPAddress -Confirm:$false
-    New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix | Out-Null
-} else {
-    Write-Host "[INFO] Static IP already correct on $internalIf" -ForegroundColor Cyan
+
+Write-Host "[ACTION] Setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
+
+# Remove any existing IPv4 address on this interface (prevents conflicts)
+Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false
+
+# Set the new static IP
+try {
+    New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix -ErrorAction Stop | Out-Null
+    Write-Host "[INFO] Static IP assigned successfully." -ForegroundColor Green
+} catch {
+    Write-Host "[ERROR] Failed to set static IP: $_" -ForegroundColor Red
+    exit 1
 }
 
+# Verify the IP was applied correctly
+$verify = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -eq $targetIP }
+if (-not $verify) {
+    Write-Host "[ERROR] Verification failed – IP not set correctly." -ForegroundColor Red
+    exit 1
+} else {
+    Write-Host "[INFO] Verification passed: $targetIP/$prefix on $internalIf" -ForegroundColor Green
+}
+
+# Ensure external interface uses DHCP
 $extDhcp = Get-NetIPInterface -InterfaceAlias $externalIf | Select-Object -ExpandProperty Dhcp
 if ($extDhcp -ne 'Enabled') {
     Write-Host "[ACTION] Setting external interface $externalIf to DHCP..." -ForegroundColor Yellow
