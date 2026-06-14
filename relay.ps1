@@ -126,7 +126,7 @@ if (-not $existingScope) {
 # --- NEW: DHCP Reservation for Node VM (MAC 08-00-27-91-C0-11) ---
 $nodeReservationIP = "192.168.99.82"
 $nodeMAC = "08-00-27-91-C0-11"    # canonical form of 08002791C011
-$reservation = Get-DhcpServerv4Reservation -ScopeId $nodeScopeId -IPAddress $nodeReservationIP -ErrorAction SilentlyContinue
+$reservation = Get-DhcpServerv4Reservation -IPAddress $nodeReservationIP -ErrorAction SilentlyContinue
 if (-not $reservation) {
     Write-Host "[ACTION] Creating DHCP reservation for Node VM ($nodeReservationIP -> $nodeMAC)..." -ForegroundColor Yellow
     Add-DhcpServerv4Reservation -ScopeId $nodeScopeId -IPAddress $nodeReservationIP -ClientId $nodeMAC -Description "Node VM" | Out-Null
