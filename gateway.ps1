@@ -177,7 +177,7 @@ if (-not $icmpRule) {
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 9. Create fwon / fwoff shortcuts (ALWAYS recreate them)
+# 9. Create fwon / fwoff shortcuts (ALWAYS recreate with improved logic)
 # ----------------------------------------------
 $LabDir = "C:\Lab4"
 if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
@@ -185,28 +185,45 @@ if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out
 $fwonPath = "$LabDir\fwon.ps1"
 $fwoffPath = "$LabDir\fwoff.ps1"
 
-# Always recreate the PowerShell scripts (overwrite)
 Write-Host "[ACTION] Creating/updating fwon.ps1 and fwoff.ps1..." -ForegroundColor Yellow
 
-$fwonScript = @"
-`$HostIPFile = "C:\Lab4_HostIP.txt"
-if (Test-Path `$HostIPFile) { `$HostIP = Get-Content `$HostIPFile } else { `$HostIP = Read-Host "Enter Host OS IP" ; `$HostIP | Out-File `$HostIPFile -Force }
-Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow -RemoteAddress `$HostIP | Out-Null
-New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block -RemoteAddress `$HostIP | Out-Null
-Start-Service sshd -ErrorAction SilentlyContinue
-Write-Host "Firewall is now ON and persistent." -ForegroundColor Green
-"@
-$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
+$fwonScript = @'
+$HostIPFile = "C:\Lab4_HostIP.txt"
+if (Test-Path $HostIPFile) {
+    $HostIP = Get-Content $HostIPFile
+} else {
+    $HostIP = Read-Host "Enter your Host OS IP address"
+    $HostIP | Out-File $HostIPFile -Force
+}
 
-$fwoffScript = @"
-Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host","Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
-Remove-Item -Path "C:\Lab4_HostIP.txt" -ErrorAction SilentlyContinue
-Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
-"@
+Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+
+Disable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbound -ErrorAction SilentlyContinue
+
+New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
+    -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
+    -RemoteAddress $HostIP -Profile Any | Out-Null
+
+New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
+    -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
+    -RemoteAddress $HostIP -Profile Any | Out-Null
+
+Start-Service sshd -ErrorAction SilentlyContinue
+Write-Host "Firewall ON: SSH allowed (only from $HostIP), ICMP blocked (only from $HostIP)." -ForegroundColor Green
+'@
+
+$fwoffScript = @'
+Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+Enable-NetFirewallRule -DisplayGroup "File and Printer Sharing" -Direction Inbound -ErrorAction SilentlyContinue
+Write-Host "Firewall OFF: Custom rules removed. Default ICMP echo rule enabled (ping allowed)." -ForegroundColor Green
+'@
+
+$fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
 $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8 -Force
 
-# Always recreate the .cmd wrappers (delete existing then create new)
+# Recreate .cmd wrappers with double quotes
 $fwonCmd = "C:\Windows\fwon.cmd"
 $fwoffCmd = "C:\Windows\fwoff.cmd"
 Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
@@ -219,9 +236,8 @@ Write-Host "=========================================================" -Foregrou
 Write-Host "  GATEWAY SETUP COMPLETE" -ForegroundColor Green
 Write-Host "  - External : $externalIf (DHCP)" -ForegroundColor Green
 Write-Host "  - Internal : $internalIf = 192.168.99.1/29" -ForegroundColor Green
-Write-Host "  - NAT rule created (will work after RemoteAccess starts)" -ForegroundColor Green
 if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
-    Write-Host "  - [REBOOT RECOMMENDED] Please restart the Gateway VM for NAT to function." -ForegroundColor Red
+    Write-Host "  - [REBOOT RECOMMENDED] Restart Gateway VM for NAT to function." -ForegroundColor Red
 }
-Write-Host "  - Shortcuts 'fwon' and 'fwoff' are now available (persistent firewall toggle)." -ForegroundColor Green
+Write-Host "  - Commands 'fwon' / 'fwoff' now available (persistent firewall toggle)." -ForegroundColor Green
 Write-Host "=========================================================" -ForegroundColor Cyan
