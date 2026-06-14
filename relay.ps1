@@ -8,8 +8,8 @@ Write-Host "=========================================================" -Foregrou
 # ----------------------------------------------
 # 1. Hardcoded interface names (no prompts, no auto-detection)
 # ----------------------------------------------
-$internalIf = "Ethernet"   # Facing Gateway (has 192.168.99.2)
-$bridgedIf  = "Ethernet 2" # Facing Node (has 192.168.99.81)
+$internalIf = "Ethernet"   # Facing Gateway (gets DHCP 192.168.99.2)
+$bridgedIf  = "Ethernet 2" # Facing Node (static 192.168.99.81)
 
 # Verify both interfaces exist and are up
 $eth1 = Get-NetAdapter -Name $internalIf -ErrorAction SilentlyContinue
@@ -55,42 +55,68 @@ if ($dhcpStatus -ne 'Enabled') {
 }
 
 # ----------------------------------------------
-# 4. IP Forwarding (registry) + Routing service
+# 4. IP Forwarding (registry, interface forwarding, routing service)
 # ----------------------------------------------
+Write-Host "[ACTION] Configuring IP forwarding..." -ForegroundColor Yellow
+
+# Registry setting for global forwarding
 $routingKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
 $ipEnableRouter = Get-ItemProperty -Path $routingKey -Name "IPEnableRouter" -ErrorAction SilentlyContinue
 if ($ipEnableRouter.IPEnableRouter -ne 1) {
-    Write-Host "[ACTION] Enabling IP forwarding in registry..." -ForegroundColor Yellow
+    Write-Host "  - Enabling IP forwarding in registry..." -ForegroundColor Yellow
     Set-ItemProperty -Path $routingKey -Name "IPEnableRouter" -Value 1 -Force
 }
 
+# Explicitly enable forwarding on each interface (works without reboot)
+Write-Host "  - Enabling forwarding on $internalIf..." -ForegroundColor Yellow
+netsh interface ipv4 set interface "$internalIf" forwarding=enabled | Out-Null
+Write-Host "  - Enabling forwarding on $bridgedIf..." -ForegroundColor Yellow
+netsh interface ipv4 set interface "$bridgedIf" forwarding=enabled | Out-Null
+
+# Install Routing feature if not present
 $routingFeature = Get-WindowsFeature -Name Routing
 if (-not $routingFeature.Installed) {
-    Write-Host "[ACTION] Installing Routing feature..." -ForegroundColor Yellow
+    Write-Host "  - Installing Routing feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name Routing -IncludeManagementTools | Out-Null
 }
 
+# Start RemoteAccess service (Routing and Remote Access)
 $ras = Get-Service RemoteAccess -ErrorAction SilentlyContinue
 if ($ras.Status -ne 'Running') {
-    Write-Host "[ACTION] Attempting to start RemoteAccess service..." -ForegroundColor Yellow
+    Write-Host "  - Setting RemoteAccess service to Automatic..." -ForegroundColor Yellow
     Set-Service RemoteAccess -StartupType Automatic -ErrorAction SilentlyContinue
     try {
         Start-Service RemoteAccess -ErrorAction Stop
-        Write-Host "[INFO] RemoteAccess service started successfully." -ForegroundColor Green
+        Write-Host "  - RemoteAccess service started successfully." -ForegroundColor Green
     } catch {
-        Write-Host "[WARNING] RemoteAccess service could not be started. A reboot may be required for routing to work." -ForegroundColor Red
-        Write-Host "[INFO] The service has been set to start automatically. Please reboot the Relay VM later." -ForegroundColor Yellow
+        Write-Host "  - [WARNING] RemoteAccess service could not be started. A reboot will be required." -ForegroundColor Red
+        Write-Host "  - The service has been set to start automatically. Please reboot the Relay VM later." -ForegroundColor Yellow
     }
 } else {
-    Write-Host "[INFO] RemoteAccess service already running." -ForegroundColor Cyan
+    Write-Host "  - RemoteAccess service already running." -ForegroundColor Cyan
+}
+
+# Enable firewall rules for routing
+Write-Host "  - Enabling Routing and Remote Access firewall rules..." -ForegroundColor Yellow
+Enable-NetFirewallRule -DisplayGroup "Routing and Remote Access" -ErrorAction SilentlyContinue
+
+# Ensure a default route exists (via Gateway's internal IP 192.168.99.1)
+$defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+if (-not $defaultRoute) {
+    Write-Host "  - Adding default route via 192.168.99.1 on $internalIf..." -ForegroundColor Yellow
+    New-NetRoute -DestinationPrefix "0.0.0.0/0" -NextHop "192.168.99.1" -InterfaceAlias $internalIf -ErrorAction SilentlyContinue | Out-Null
+} else {
+    Write-Host "  - Default route already exists." -ForegroundColor Cyan
 }
 
 # ----------------------------------------------
 # 5. DHCP Server for Node (feature, service, scope, reservation)
 # ----------------------------------------------
+Write-Host "[ACTION] Configuring DHCP server for Node..." -ForegroundColor Yellow
+
 $dhcpFeature = Get-WindowsFeature -Name DHCP
 if (-not $dhcpFeature.Installed) {
-    Write-Host "[ACTION] Installing DHCP Server feature..." -ForegroundColor Yellow
+    Write-Host "  - Installing DHCP Server feature..." -ForegroundColor Yellow
     Install-WindowsFeature -Name DHCP -IncludeManagementTools | Out-Null
 }
 $dhcpSvc = Get-Service DHCPServer -ErrorAction SilentlyContinue
@@ -102,16 +128,16 @@ if ($dhcpSvc.Status -ne 'Running') {
 # Authorize DHCP server only if domain-joined (otherwise ignore)
 $domainStatus = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
 if ($domainStatus) {
-    Write-Host "[INFO] Domain-joined – authorizing DHCP server..." -ForegroundColor Yellow
+    Write-Host "  - Domain-joined – authorizing DHCP server..." -ForegroundColor Yellow
     Add-DhcpServerInDC -DnsName $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
 } else {
-    Write-Host "[INFO] Workgroup environment – DHCP authorization skipped (not required)." -ForegroundColor Cyan
+    Write-Host "  - Workgroup environment – DHCP authorization skipped." -ForegroundColor Cyan
 }
 
 $nodeScopeId = "192.168.99.80"
 $existingScope = Get-DhcpServerv4Scope -ScopeId $nodeScopeId -ErrorAction SilentlyContinue
 if (-not $existingScope) {
-    Write-Host "[ACTION] Creating DHCP scope for Node (assigns 192.168.99.82)..." -ForegroundColor Yellow
+    Write-Host "  - Creating DHCP scope for Node (assigns 192.168.99.82)..." -ForegroundColor Yellow
     Add-DhcpServerv4Scope -Name "NodeScope" `
         -StartRange 192.168.99.82 `
         -EndRange 192.168.99.82 `
@@ -123,7 +149,7 @@ if (-not $existingScope) {
         -Router 192.168.99.81 `
         -DnsServer $dnsServers -ErrorAction Stop | Out-Null
 } else {
-    Write-Host "[INFO] DHCP scope for Node (192.168.99.80/28) already exists." -ForegroundColor Cyan
+    Write-Host "  - DHCP scope for Node already exists." -ForegroundColor Cyan
 }
 
 # DHCP Reservation for Node VM (MAC 08-00-27-91-C0-11)
@@ -131,23 +157,30 @@ $nodeReservationIP = "192.168.99.82"
 $nodeMAC = "08-00-27-91-C0-11"
 $reservation = Get-DhcpServerv4Reservation -IPAddress $nodeReservationIP -ErrorAction SilentlyContinue
 if (-not $reservation) {
-    Write-Host "[ACTION] Creating DHCP reservation for Node VM ($nodeReservationIP -> $nodeMAC)..." -ForegroundColor Yellow
+    Write-Host "  - Creating DHCP reservation for Node VM ($nodeReservationIP -> $nodeMAC)..." -ForegroundColor Yellow
     Add-DhcpServerv4Reservation -ScopeId $nodeScopeId -IPAddress $nodeReservationIP -ClientId $nodeMAC -Description "Node VM" | Out-Null
-    Write-Host "[INFO] Reservation added successfully." -ForegroundColor Green
+    Write-Host "  - Reservation added successfully." -ForegroundColor Green
 } else {
-    Write-Host "[INFO] DHCP reservation for $nodeReservationIP (MAC $nodeMAC) already exists." -ForegroundColor Cyan
+    Write-Host "  - DHCP reservation already exists." -ForegroundColor Cyan
 }
 
 # Ensure firewall allows DHCP traffic
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
+# ----------------------------------------------
+# Final status
+# ----------------------------------------------
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  RELAY SETUP COMPLETE" -ForegroundColor Green
 Write-Host "  - Internal ($internalIf) : should have 192.168.99.2 (from Gateway DHCP)" -ForegroundColor Green
 Write-Host "  - Bridged ($bridgedIf)   : static 192.168.99.81/28" -ForegroundColor Green
-Write-Host "  - DHCP server for Node ready (assigns 192.168.99.82)" -ForegroundColor Green
-Write-Host "  - RESERVATION: 192.168.99.82 reserved for MAC 08-00-27-91-C0-11 (Node VM)" -ForegroundColor Green
-if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
-    Write-Host "  - [REBOOT RECOMMENDED] Restart Relay VM for routing to function." -ForegroundColor Red
+Write-Host "  - DHCP server ready (assigns 192.168.99.82 to Node)" -ForegroundColor Green
+Write-Host "  - IP forwarding enabled on both interfaces" -ForegroundColor Green
+
+$rasRunning = (Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -eq 'Running'
+if (-not $rasRunning) {
+    Write-Host "  - [REBOOT REQUIRED] RemoteAccess service not started. Routing will work after reboot." -ForegroundColor Red
+} else {
+    Write-Host "  - Routing is active – Node should reach Gateway and Internet." -ForegroundColor Green
 }
 Write-Host "=========================================================" -ForegroundColor Cyan
