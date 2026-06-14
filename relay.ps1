@@ -1,52 +1,94 @@
-#Requires -RunAsAdministrator
-$ErrorActionPreference = "Stop"
+#!/bin/bash
+# Lab 3/4 Relay Setup Script (Ubuntu)
+# Requirements: Internal DHCP client, Bridged 192.168.99.80/28, DHCP .82 for Node, Forwarding
 
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  Lab 3/4: Windows Server 2022 Core Relay Setup" -ForegroundColor Cyan
-Write-Host "=========================================================" -ForegroundColor Cyan
+set -e
 
-# 1. Install DHCP Role if missing
-Write-Host "[INFO] Checking DHCP Server role..." -ForegroundColor Yellow
-$dhcpFeature = Get-WindowsFeature -Name DHCP
-if (-not $dhcpFeature.Installed) {
-    Write-Host "[ACTION] Installing DHCP Server role and management tools..." -ForegroundColor Yellow
-    Install-WindowsFeature -Name DHCP -IncludeManagementTools | Out-Null
-    Write-Host "[SUCCESS] DHCP Server role installed." -ForegroundColor Green
-} else {
-    Write-Host "[SUCCESS] DHCP Server role is already installed." -ForegroundColor Green
+echo "========================================================="
+echo "  Lab 3/4: Relay VM Configuration"
+echo "========================================================="
+
+# 1. Install Dependencies
+echo "[INFO] Checking dependencies..."
+if ! dpkg -l | grep -q kea-dhcp4; then
+    sudo apt update && sudo apt install -y kea-dhcp4
+fi
+
+# 2. Configure Netplan
+# enp0s3 = Internal (DHCP from Gateway), enp0s8 = Bridged (Static .81)
+cat > /etc/netplan/99_config.yaml << 'EOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: true
+      dhcp4-overrides:
+        use-routes: true
+    enp0s8:
+      addresses:
+        - 192.168.99.81/28
+EOF
+sudo netplan apply
+echo "[SUCCESS] Netplan applied."
+
+# 3. Configure Kea DHCP (Bridged Subnet for Node)
+cat > /etc/kea/kea-dhcp4.conf << 'EOF'
+{
+  "Dhcp4": {
+    "interfaces-config": { "interfaces": [ "enp0s8" ] },
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/kea-leases4.csv"
+    },
+    "valid-lifetime": 3600,
+    "subnet4": [
+      {
+        "id": 2,
+        "subnet": "192.168.99.80/28",
+        "pools": [ { "pool": "192.168.99.82 - 192.168.99.82" } ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.99.81" },
+          { "name": "domain-name-servers", "data": "1.1.1.1" }
+        ]
+      }
+    ]
+  }
 }
+EOF
+sudo -u _kea kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+sudo rm -f /var/lib/kea/kea-leases4.csv
+sudo systemctl restart kea-dhcp4-server
+sudo systemctl enable kea-dhcp4-server
+echo "[SUCCESS] Kea DHCP configured for 192.168.99.80/28 -> .82"
 
-# 2. Identify Interfaces and Configure IP
-Write-Host "[INFO] Available Network Adapters:" -ForegroundColor Yellow
-Get-NetAdapter | Format-Table Name, InterfaceDescription, Status
+# 4. Enable IP Forwarding
+sudo sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+sudo sysctl -p
 
-$NodeInterface = Read-Host "Enter the Name of the interface facing the NODE (e.g., 'Ethernet 2')"
-Write-Host "[ACTION] Configuring Static IP 192.168.99.81/28 on $NodeInterface..." -ForegroundColor Yellow
-New-NetIPAddress -InterfaceAlias $NodeInterface -IPAddress 192.168.99.81 -PrefixLength 28 -ErrorAction SilentlyContinue | Out-Null
+# 5. Configure Permissive Nftables for Routing
+sudo nft flush ruleset
+sudo nft add table ip filter
+sudo nft add chain ip filter INPUT '{ type filter hook input priority 0; policy accept; }'
+sudo nft add chain ip filter FORWARD '{ type filter hook forward priority 0; policy accept; }'
+sudo nft add chain ip filter OUTPUT '{ type filter hook output priority 0; policy accept; }'
+sudo nft add rule ip filter INPUT iifname "lo" accept
+sudo nft add rule ip filter INPUT ct state established,related accept
 
-# 3. Configure DHCP Scope
-Write-Host "[ACTION] Configuring DHCP Scope for Node..." -ForegroundColor Yellow
-Restart-Service -Name DHCPServer -Force -ErrorAction SilentlyContinue
+# NAT Masquerade toward Gateway (enp0s3)
+sudo nft add table ip nat
+sudo nft add chain ip nat POSTROUTING '{ type nat hook postrouting priority 100; policy accept; }'
+sudo nft add rule ip nat POSTROUTING oifname "enp0s3" counter masquerade
 
-$scope = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "NodeScope" }
-if (-not $scope) {
-    Add-DhcpServerv4Scope -Name "NodeScope" `
-        -StartRange 192.168.99.82 `
-        -EndRange 192.168.99.82 `
-        -SubnetMask 255.255.255.240 `
-        -State Active | Out-Null
-    Write-Host "[SUCCESS] DHCP Scope created." -ForegroundColor Green
-}
+# 6. Save Rules & Create Boot Hook
+sudo nft list ruleset > /etc/nftables.ruleset
+sudo mkdir -p /etc/networkd-dispatcher/routable.d
+printf '#!/bin/sh\n/usr/sbin/nft --file /etc/nftables.ruleset\nexit 0\n' | sudo tee /etc/networkd-dispatcher/routable.d/50-ifup.hooks > /dev/null
+sudo chmod +x /etc/networkd-dispatcher/routable.d/50-ifup.hooks
+echo "[SUCCESS] Relay routing and firewall rules saved and persistent."
 
-Set-DhcpServerv4OptionValue -ScopeId 192.168.99.80 `
-    -Router 192.168.99.81 `
-    -DnsServer 1.1.1.1, 8.8.8.8 -ErrorAction SilentlyContinue | Out-Null
-
-# 4. Enable IP Forwarding (Routing)
-Write-Host "[ACTION] Enabling IP Forwarding (Routing)..." -ForegroundColor Yellow
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "IPEnableRouter" -Value 1 -Force
-Write-Host "[SUCCESS] IP Forwarding enabled. (A reboot may be required for routing to fully take effect)." -ForegroundColor Green
-
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  RELAY SETUP COMPLETE!" -ForegroundColor Green
-Write-Host "=========================================================" -ForegroundColor Cyan
+echo "========================================================="
+echo "  RELAY SETUP COMPLETE"
+echo "  Node VM (Laptop) should now receive 192.168.99.82"
+echo "========================================================="
