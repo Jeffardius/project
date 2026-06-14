@@ -56,19 +56,32 @@ Write-Host "[INFO] External interface: $externalIf (DHCP)" -ForegroundColor Gree
 Write-Host "[INFO] Internal interface: $internalIf (will be 192.168.99.1/29)" -ForegroundColor Green
 
 # ----------------------------------------------
-# 4. Configure static IP on internal interface (only if wrong)
+# 4. Configure static IP on internal interface (FORCE SET)
 # ----------------------------------------------
 $targetIP = "192.168.99.1"
 $prefix = 29
-$currentIP = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $targetIP }
-if (-not $currentIP) {
-    Write-Host "[ACTION] Setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
-    Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -like "192.168.99.*" } | Remove-NetIPAddress -Confirm:$false
-    New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix | Out-Null
-} else {
-    Write-Host "[INFO] Static IP already correct on $internalIf" -ForegroundColor Cyan
-}
 
+Write-Host "[ACTION] Force setting static IP $targetIP/$prefix on $internalIf ..." -ForegroundColor Yellow
+
+# Remove ALL IPv4 addresses on this interface (to avoid conflicts)
+Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | 
+    Remove-NetIPAddress -Confirm:$false
+
+# Now add the desired static IP
+New-NetIPAddress -InterfaceAlias $internalIf -IPAddress $targetIP -PrefixLength $prefix | Out-Null
+
+# Ensure interface is up
+Set-NetAdapter -Name $internalIf -Status Up -ErrorAction SilentlyContinue
+
+# Verify
+$check = Get-NetIPAddress -InterfaceAlias $internalIf -AddressFamily IPv4 | Where-Object { $_.IPAddress -eq $targetIP }
+if (-not $check) {
+    Write-Host "[ERROR] Failed to set static IP on $internalIf" -ForegroundColor Red
+    exit 1
+}
+Write-Host "[INFO] Static IP $targetIP/$prefix successfully set on $internalIf" -ForegroundColor Green
+
+# Ensure external interface uses DHCP
 $extDhcp = Get-NetIPInterface -InterfaceAlias $externalIf | Select-Object -ExpandProperty Dhcp
 if ($extDhcp -ne 'Enabled') {
     Write-Host "[ACTION] Setting external interface $externalIf to DHCP..." -ForegroundColor Yellow
@@ -141,6 +154,9 @@ if ($domainStatus) {
     Write-Host "[INFO] Workgroup environment – DHCP authorization skipped (not required)." -ForegroundColor Cyan
 }
 
+# Bind DHCP to internal interface
+Add-DhcpServerv4Binding -InterfaceAlias $internalIf -ErrorAction SilentlyContinue
+
 $scopeId = "192.168.99.0"
 $existingScope = Get-DhcpServerv4Scope -ScopeId $scopeId -ErrorAction SilentlyContinue
 if (-not $existingScope) {
@@ -152,7 +168,7 @@ if (-not $existingScope) {
         -State Active | Out-Null
     Set-DhcpServerv4OptionValue -ScopeId $scopeId `
         -Router 192.168.99.1 `
-        -DnsServer 1.1.1.1, 8.8.8.8 | Out-Null
+        -DnsServer "8.8.8.8", "8.8.4.4" | Out-Null
 } else {
     Write-Host "[INFO] DHCP scope for 192.168.99.0/29 already exists." -ForegroundColor Cyan
 }
@@ -177,7 +193,7 @@ if (-not $icmpRule) {
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 # ----------------------------------------------
-# 9. Create fwon / fwoff shortcuts (ALWAYS recreate with improved logic)
+# 9. Create fwon / fwoff shortcuts (ALWAYS recreate)
 # ----------------------------------------------
 $LabDir = "C:\Lab4"
 if (-not (Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
@@ -223,7 +239,6 @@ Write-Host "Firewall OFF: Custom rules removed. Default ICMP echo rule enabled (
 $fwonScript | Out-File -FilePath $fwonPath -Encoding utf8 -Force
 $fwoffScript | Out-File -FilePath $fwoffPath -Encoding utf8 -Force
 
-# Recreate .cmd wrappers with double quotes
 $fwonCmd = "C:\Windows\fwon.cmd"
 $fwoffCmd = "C:\Windows\fwoff.cmd"
 Remove-Item -Path $fwonCmd -Force -ErrorAction SilentlyContinue
