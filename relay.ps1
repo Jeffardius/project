@@ -82,7 +82,7 @@ if ($ras.Status -ne 'Running') {
 }
 
 # ----------------------------------------------
-# 5. DHCP Server for Node (feature, service, scope)
+# 5. DHCP Server for Node (feature, service, scope, and reservation)
 # ----------------------------------------------
 $dhcpFeature = Get-WindowsFeature -Name DHCP
 if (-not $dhcpFeature.Installed) {
@@ -114,8 +114,6 @@ if (-not $existingScope) {
         -SubnetMask 255.255.255.240 `
         -State Active | Out-Null
     
-    # Set DHCP options: default gateway = Relay's bridged IP, DNS = 8.8.8.8 (or Cloudflare)
-    # Using array of strings to avoid parsing issues
     $dnsServers = @("8.8.8.8", "8.8.4.4")
     Set-DhcpServerv4OptionValue -ScopeId $nodeScopeId `
         -Router 192.168.99.81 `
@@ -124,14 +122,24 @@ if (-not $existingScope) {
     Write-Host "[INFO] DHCP scope for Node (192.168.99.80/28) already exists." -ForegroundColor Cyan
 }
 
-# Ensure firewall allows DHCP traffic (role already adds rules, but enable just in case)
+# Add reservation for node with MAC address 08-00-27-91-C0-11 to always get 192.168.99.82
+$nodeMac = "08002791C011"   # without separators
+$nodeIP = "192.168.99.82"
+$existingReservation = Get-DhcpServerv4Reservation -ScopeId $nodeScopeId -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $nodeIP }
+if (-not $existingReservation) {
+    Write-Host "[ACTION] Creating DHCP reservation for node MAC $nodeMac to IP $nodeIP ..." -ForegroundColor Yellow
+    Add-DhcpServerv4Reservation -ScopeId $nodeScopeId -IPAddress $nodeIP -ClientId $nodeMac -Name "NodeVM" -Description "Reserved for lab node" | Out-Null
+} else {
+    Write-Host "[INFO] DHCP reservation for IP $nodeIP already exists." -ForegroundColor Cyan
+}
+
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 Write-Host "=========================================================" -ForegroundColor Cyan
 Write-Host "  RELAY SETUP COMPLETE" -ForegroundColor Green
 Write-Host "  - Internal ($internalIf) : should have 192.168.99.2 (from Gateway DHCP)" -ForegroundColor Green
 Write-Host "  - Bridged ($bridgedIf)   : static 192.168.99.81/28" -ForegroundColor Green
-Write-Host "  - DHCP server for Node ready (assigns 192.168.99.82)" -ForegroundColor Green
+Write-Host "  - DHCP server for Node ready – reservation ensures node gets 192.168.99.82" -ForegroundColor Green
 if ((Get-Service RemoteAccess -ErrorAction SilentlyContinue).Status -ne 'Running') {
     Write-Host "  - [REBOOT RECOMMENDED] Restart Relay VM for routing to function." -ForegroundColor Red
 }
