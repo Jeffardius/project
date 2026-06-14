@@ -6,26 +6,30 @@ Write-Host "  Lab 3/4: Windows Server 2022 Core Relay Setup" -ForegroundColor Cy
 Write-Host "=========================================================" -ForegroundColor Cyan
 
 # ----------------------------------------------
-# 1. Identify interfaces (with defaults)
+# 1. Hardcoded interface names (no prompts, no auto-detection)
 # ----------------------------------------------
-$adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
-if ($adapters.Count -lt 2) {
-    Write-Host "[ERROR] Less than 2 network adapters are Up. Exiting." -ForegroundColor Red
+$internalIf = "eth1"   # Facing Gateway (receives DHCP from Gateway)
+$bridgedIf  = "eth2"   # Facing Node (static IP, DHCP server for Node)
+
+# Verify both interfaces exist and are up
+$eth1 = Get-NetAdapter -Name $internalIf -ErrorAction SilentlyContinue
+$eth2 = Get-NetAdapter -Name $bridgedIf -ErrorAction SilentlyContinue
+
+if (-not $eth1 -or $eth1.Status -ne 'Up') {
+    Write-Host "[ERROR] Interface '$internalIf' not found or not UP. Exiting." -ForegroundColor Red
     exit 1
 }
-$defaultInternal = $adapters[0].Name
-$defaultBridged  = $adapters[1].Name
+if (-not $eth2 -or $eth2.Status -ne 'Up') {
+    Write-Host "[ERROR] Interface '$bridgedIf' not found or not UP. Exiting." -ForegroundColor Red
+    exit 1
+}
 
-Write-Host "[INFO] Detected adapters:" -ForegroundColor Yellow
-Write-Host "   Adapter 1 (to Gateway): $defaultInternal" -ForegroundColor Green
-Write-Host "   Adapter 2 (to Node)   : $defaultBridged" -ForegroundColor Green
-$internalIf = Read-Host "Enter interface facing GATEWAY (default: $defaultInternal)"
-if ([string]::IsNullOrWhiteSpace($internalIf)) { $internalIf = $defaultInternal }
-$bridgedIf = Read-Host "Enter interface facing NODE (default: $defaultBridged)"
-if ([string]::IsNullOrWhiteSpace($bridgedIf)) { $bridgedIf = $defaultBridged }
+Write-Host "[INFO] Using interfaces:" -ForegroundColor Yellow
+Write-Host "   Internal (to Gateway): $internalIf" -ForegroundColor Green
+Write-Host "   Bridged (to Node)    : $bridgedIf" -ForegroundColor Green
 
 # ----------------------------------------------
-# 2. Configure bridged interface static IP (only if not already 192.168.99.81/28)
+# 2. Configure bridged interface static IP (192.168.99.81/28)
 # ----------------------------------------------
 $targetIP = "192.168.99.81"
 $prefix = 28
@@ -82,7 +86,7 @@ if ($ras.Status -ne 'Running') {
 }
 
 # ----------------------------------------------
-# 5. DHCP Server for Node (feature, service, scope)
+# 5. DHCP Server for Node (feature, service, scope, reservation)
 # ----------------------------------------------
 $dhcpFeature = Get-WindowsFeature -Name DHCP
 if (-not $dhcpFeature.Installed) {
@@ -114,7 +118,6 @@ if (-not $existingScope) {
         -SubnetMask 255.255.255.240 `
         -State Active | Out-Null
     
-    # Set DHCP options: default gateway = Relay's bridged IP, DNS = 8.8.8.8 (or Cloudflare)
     $dnsServers = @("8.8.8.8", "8.8.4.4")
     Set-DhcpServerv4OptionValue -ScopeId $nodeScopeId `
         -Router 192.168.99.81 `
@@ -123,9 +126,9 @@ if (-not $existingScope) {
     Write-Host "[INFO] DHCP scope for Node (192.168.99.80/28) already exists." -ForegroundColor Cyan
 }
 
-# --- NEW: DHCP Reservation for Node VM (MAC 08-00-27-91-C0-11) ---
+# DHCP Reservation for Node VM (MAC 08-00-27-91-C0-11)
 $nodeReservationIP = "192.168.99.82"
-$nodeMAC = "08-00-27-91-C0-11"    # canonical form of 08002791C011
+$nodeMAC = "08-00-27-91-C0-11"
 $reservation = Get-DhcpServerv4Reservation -IPAddress $nodeReservationIP -ErrorAction SilentlyContinue
 if (-not $reservation) {
     Write-Host "[ACTION] Creating DHCP reservation for Node VM ($nodeReservationIP -> $nodeMAC)..." -ForegroundColor Yellow
@@ -135,7 +138,7 @@ if (-not $reservation) {
     Write-Host "[INFO] DHCP reservation for $nodeReservationIP (MAC $nodeMAC) already exists." -ForegroundColor Cyan
 }
 
-# Ensure firewall allows DHCP traffic (role already adds rules, but enable just in case)
+# Ensure firewall allows DHCP traffic
 Enable-NetFirewallRule -DisplayGroup "DHCP Server" -ErrorAction SilentlyContinue
 
 Write-Host "=========================================================" -ForegroundColor Cyan
