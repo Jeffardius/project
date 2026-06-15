@@ -124,14 +124,24 @@ if ($ras.Status -ne 'Running') {
 }
 
 # ----------------------------------------------
-# 6. NAT (only if missing)
+# 6. NAT (Expanded to /24 to cover all lab subnets)
 # ----------------------------------------------
 $natExists = Get-NetNat -Name "LabNAT" -ErrorAction SilentlyContinue
-if (-not $natExists) {
-    Write-Host "[ACTION] Creating NAT for 192.168.99.0/29..." -ForegroundColor Yellow
-    New-NetNat -Name "LabNAT" -InternalIPInterfaceAddressPrefix "192.168.99.0/29" | Out-Null
+if ($natExists) {
+    Remove-NetNat -Name "LabNAT" -Confirm:$false
+}
+Write-Host "[ACTION] Creating NAT for 192.168.99.0/24..." -ForegroundColor Yellow
+New-NetNat -Name "LabNAT" -InternalIPInterfaceAddressPrefix "192.168.99.0/24" | Out-Null
+
+# ----------------------------------------------
+# 6.5 Static Route to Relay VM (Required for Node subnet)
+# ----------------------------------------------
+$routeExists = Get-NetRoute -DestinationPrefix "192.168.99.80/28" -ErrorAction SilentlyContinue
+if (-not $routeExists) {
+    Write-Host "[ACTION] Adding static route for Node subnet via Relay VM..." -ForegroundColor Yellow
+    New-NetRoute -DestinationPrefix "192.168.99.80/28" -NextHop "192.168.99.2" -InterfaceAlias $internalIf | Out-Null
 } else {
-    Write-Host "[INFO] NAT 'LabNAT' already exists." -ForegroundColor Cyan
+    Write-Host "[INFO] Static route to Node subnet already exists." -ForegroundColor Cyan
 }
 
 # ----------------------------------------------
