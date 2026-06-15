@@ -1,32 +1,22 @@
+#Requires -RunAsAdministrator
 
----
+Write-Host "=== BLOCKING PING ===" -ForegroundColor Red
 
-## ✅ What this script ✅ What this script does differently does differently
+# 1. Turn firewall ON (required to block anything)
+Set-NetFirewallProfile -All -Enabled True
+Write-Host "Firewall enabled." -ForegroundColor Green
 
-- **
+# 2. Remove any custom allow rule for ICMP (if exists)
+Remove-NetFirewallRule -DisplayName "Allow_ALL_ICMPv4" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Lab_Allow_Ping" -ErrorAction SilentlyContinue
 
-- **Removes ALLRemoves ALL allow rules** (not just the ones named allow rules** (not just the `Lab_* ones named `Lab_*`)
-- **Explicitly dis`)
-- **Exables** the built‑plicitly disables**in rules that * the built‑in rulescould* allow ping (they that *could* allow ping are usually (they are usually off by default, but we force them off)
-- **T off by default, but we force them off)
-- **Turns the firewall ON** –urns the firewall ON** – because when because when the firewall is OFF the firewall is OFF, everything is allowed, everything is allowed (including ping). (including ping). If you want ping If you want ping blocked, firewall **must** be ON blocked, firewall **must** be ON.
-- **Creates a shortcut**.
-- **Creates a shortcut** (optional) to quickly re‑ (optional) to quickly re‑block ping if you ever accidentallyblock ping if you ever accidentally turn it back on turn it back on.
+# 3. Disable built-in rules that could allow ping
+Set-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)" -Enabled False -ErrorAction SilentlyContinue
+Set-NetFirewallRule -DisplayName "Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)" -Enabled False -ErrorAction SilentlyContinue
 
----
+Write-Host "All ICMP allow rules removed/disabled." -ForegroundColor Green
+Write-Host "Ping should now be BLOCKED." -ForegroundColor Yellow
 
-## 🔁 To.
-
----
-
-## 🔁 To re‑allow ping later ( re‑allow ping later (if needed)
-
-Run this (if needed)
-
-Run this (as Admin) – oras Admin) – or use the shortcut from the use the shortcut from the previous previous installer installer that that * *enables* pingenables* ping:
-
-```powershell:
-
-```powershell
-netsh adv
-netsh advfirewall firewall addfirewall firewall add rule name="Allow rule name="Allow_ALL_IC_ALL_ICMPv4"MPv4" dir=in protocol dir=in protocol=icmpv=icmpv4 action=allow4 action=allow
+# Optional: show current ICMP rules
+Write-Host "`nCurrent ICMPv4 inbound rules:" -ForegroundColor Cyan
+Get-NetFirewallRule | Where-Object { $_.DisplayName -match "ICMP|Echo" -and $_.Direction -eq 'Inbound' -and $_.Protocol -eq 'ICMPv4' } | Format-Table DisplayName, Enabled, Action -AutoSize
