@@ -1,35 +1,56 @@
-#Requires -RunAsAdministrator
-Write-Host "Fixing asymmetric forwarding on Relay..." -ForegroundColor Cyan
+PS C:\Users\Administrator> C:\fuck.ps1
+Resetting Node network interface...
 
-# 1. Ensure forwarding is enabled on both interfaces
-netsh interface ipv4 set interface "Ethernet" forwarding=enabled
-netsh interface ipv4 set interface "Ethernet 2" forwarding=enabled
 
-# 2. Delete any default route that is NOT 192.168.99.1
-$badRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Where-Object { $_.NextHop -ne "192.168.99.1" }
-foreach ($r in $badRoutes) {
-    Write-Host "Removing incorrect default route via $($r.NextHop) on $($r.InterfaceAlias)"
-    Remove-NetRoute -DestinationPrefix "0.0.0.0/0" -NextHop $r.NextHop -InterfaceAlias $r.InterfaceAlias -Confirm:$false
-}
+IPAddress         : 192.168.99.82
+InterfaceIndex    : 16
+InterfaceAlias    : Ethernet
+AddressFamily     : IPv4
+Type              : Unicast
+PrefixLength      : 28
+PrefixOrigin      : Manual
+SuffixOrigin      : Manual
+AddressState      : Tentative
+ValidLifetime     : Infinite ([TimeSpan]::MaxValue)
+PreferredLifetime : Infinite ([TimeSpan]::MaxValue)
+SkipAsSource      : False
+PolicyStore       : ActiveStore
 
-# 3. Add correct default route (if missing)
-$correctRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Where-Object { $_.NextHop -eq "192.168.99.1" -and $_.InterfaceAlias -eq "Ethernet" }
-if (-not $correctRoute) {
-    Write-Host "Adding default route via 192.168.99.1 on Ethernet"
-    New-NetRoute -DestinationPrefix "0.0.0.0/0" -NextHop "192.168.99.1" -InterfaceAlias "Ethernet" -RouteMetric 1 | Out-Null
-}
+IPAddress         : 192.168.99.82
+InterfaceIndex    : 16
+InterfaceAlias    : Ethernet
+AddressFamily     : IPv4
+Type              : Unicast
+PrefixLength      : 28
+PrefixOrigin      : Manual
+SuffixOrigin      : Manual
+AddressState      : Invalid
+ValidLifetime     : Infinite ([TimeSpan]::MaxValue)
+PreferredLifetime : Infinite ([TimeSpan]::MaxValue)
+SkipAsSource      : False
+PolicyStore       : PersistentStore
 
-# 4. Lower the metric on the internal interface to prefer it
-Set-NetIPInterface -InterfaceAlias "Ethernet" -InterfaceMetric 10
-Set-NetIPInterface -InterfaceAlias "Ethernet 2" -InterfaceMetric 20
 
-# 5. Disable Windows Firewall completely for a test (temporary)
-Set-NetFirewallProfile -All -Enabled False
-Write-Host "Firewall disabled temporarily for test." -ForegroundColor Yellow
+Windows IP Configuration
 
-# 6. Flush ARP and restart routing
-arp -d
-Restart-Service RemoteAccess -ErrorAction SilentlyContinue
+Successfully flushed the DNS Resolver Cache.
 
-Write-Host "`nNow test from Node: ping 192.168.99.1 and ping 8.8.8.8" -ForegroundColor Green
-Write-Host "If it works, re-enable firewall and add rules. If still fails, reboot Relay and test again." -ForegroundColor Yellow
+Testing ping to Relay (192.168.99.81)...
+
+Pinging 192.168.99.81 with 32 bytes of data:
+PING: transmit failed. General failure.
+PING: transmit failed. General failure.
+
+Ping statistics for 192.168.99.81:
+    Packets: Sent = 2, Received = 0, Lost = 2 (100% loss),
+
+Testing ping to Gateway (192.168.99.1)...
+
+Pinging 192.168.99.1 with 32 bytes of data:
+PING: transmit failed. General failure.
+PING: transmit failed. General failure.
+
+Ping statistics for 192.168.99.1:
+    Packets: Sent = 2, Received = 0, Lost = 2 (100% loss),
+
+If both pings succeed, re-enable firewall later.
