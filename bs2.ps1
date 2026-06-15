@@ -9,7 +9,7 @@ Set-Service RemoteAccess -StartupType Automatic
 Start-Service RemoteAccess
 
 # 3. Clear any stale ARP entries that might point to the wrong MAC
-Clear-NetNeighbor -InterfaceAlias "Ethernet","Ethernet 2" -AddressFamily IPv4
+Remove-NetNeighbor -InterfaceAlias "Ethernet","Ethernet 2" -AddressFamily IPv4 -ErrorAction SilentlyContinue
 
 # 4. Add a persistent default route if missing (optional but safe)
 $route = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -NextHop 192.168.99.1 -ErrorAction SilentlyContinue
