@@ -1,30 +1,56 @@
 #Requires -RunAsAdministrator
 
-Write-Host "=== Attempt to add static IP on host's subnet ===" -ForegroundColor Cyan
+Write-Host "===== VM Duplicate IP Address Fix =====" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "This script will fix the '192.168.40.82' IP address conflict by:"
+Write-Host "1. Resetting the network adapter"
+Write-Host "2. Disabling Windows' duplicate IP detection"
+Write-Host "3. Forcing a new IP address from the DHCP server"
+Write-Host ""
+Write-Host "Press any key to continue..."
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 
-# --- Configuration ---
-$HostSubnet = "10.33.28.0"
-$PrefixLength = 24
-$GatewayIP = "10.33.28.1"   # Adjust to your actual network gateway
-$StaticIP = "10.33.28.200"  # Choose an unused IP in your host's subnet
-
-# --- Identify the active network adapter ---
+# --- 1. Identify the network adapter and disable duplicate IP detection ---
 $adapter = Get-NetAdapter -Name "Ethernet" -ErrorAction SilentlyContinue
 if (-not $adapter) {
-    Write-Host "Ethernet adapter not found. Listing all adapters:" -ForegroundColor Yellow
-    Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Format-Table Name, InterfaceDescription
-    $adapterName = Read-Host "Enter the name of your network adapter"
-    $adapter = Get-NetAdapter -Name $adapterName
+    Write-Host "Network adapter 'Ethernet' not found!" -ForegroundColor Red
+    exit 1
 }
 
-Write-Host "Using adapter: $($adapter.Name)" -ForegroundColor Green
+Write-Host "Found adapter: $($adapter.Name) (MAC: $($adapter.MacAddress))" -ForegroundColor Green
 
-# --- Add a static IP on the host's subnet (preserving the existing NAT IP) ---
-Write-Host "Adding static IP $StaticIP/$PrefixLength (Gateway: $GatewayIP) ..." -ForegroundColor Yellow
-New-NetIPAddress -InterfaceAlias $adapter.Name -IPAddress $StaticIP -PrefixLength $PrefixLength -DefaultGateway $GatewayIP -ErrorAction SilentlyContinue
+Write-Host "Attempting to disable Duplicate Address Detection..." -ForegroundColor Yellow
+try {
+    Set-NetIPInterface -InterfaceAlias $adapter.Name -AddressFamily IPv4 -DadTransmits 0 -ErrorAction Stop
+    Write-Host "Successfully disabled duplicate IP detection." -ForegroundColor Green
+} catch {
+    Write-Host "Could not disable Duplicate Address Detection. This might be because the setting is already applied." -ForegroundColor Yellow
+}
 
-# --- Disable DAD to avoid IP conflicts ---
-Set-NetIPInterface -InterfaceAlias $adapter.Name -AddressFamily IPv4 -DadTransmits 0
+# --- 2. Force a hard reset of the network adapter ---
+Write-Host "Performing a hard reset of the network adapter..." -ForegroundColor Yellow
+Restart-NetAdapter -Name $adapter.Name -Confirm:$false
 
-Write-Host "`nNow test from your host: ping $StaticIP" -ForegroundColor Cyan
-Write-Host "If this works, use that IP for SSH (e.g., ssh Administrator@$StaticIP)" -ForegroundColor Green
+Write-Host "Releasing current IP address..."
+ipconfig /release
+
+Write-Host "Waiting a moment before renewing..."
+Start-Sleep -Seconds 3
+
+Write-Host "Requesting a new IP address from the DHCP server..."
+ipconfig /renew
+
+# --- 3. Final check and reboot recommendation ---
+Write-Host ""
+Write-Host "===== Script Finished =====" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "IMPORTANT: To ensure the fix is permanent, you MUST restart your VM now."
+Write-Host ""
+$restartChoice = Read-Host "Do you want to restart this VM now? (Y/N)"
+if ($restartChoice -eq 'Y' -or $restartChoice -eq 'y') {
+    Write-Host "Restarting VM in 5 seconds..."
+    Start-Sleep -Seconds 5
+    Restart-Computer -Force
+} else {
+    Write-Host "Remember to manually restart your VM for the changes to take full effect." -ForegroundColor Yellow
+}
