@@ -1,67 +1,106 @@
 #Requires -RunAsAdministrator
-$ErrorActionPreference = "Stop"
 
-Write-Host "[ACTION] Installing persistent fwon and fwoff shortcuts..." -ForegroundColor Cyan
+# ------------- Clean up old shortcuts -------------
+$oldPaths = @(
+    "C:\Windows\fwon.cmd",
+    "C:\Windows\fwoff.cmd",
+    "C:\Lab4\fwon.ps1",
+    "C:\Lab4\fwoff.ps1"
+)
+foreach ($p in $oldPaths) {
+    if (Test-Path $p) { Remove-Item -Path $p -Force }
+}
+Write-Host "Old shortcuts deleted."
 
-$LabDir = "C:\Lab4"
-if (!(Test-Path $LabDir)) { New-Item -ItemType Directory -Path $LabDir | Out-Null }
+# ------------- Create working directory -------------
+$labDir = "C:\Lab4"
+if (-not (Test-Path $labDir)) { New-Item -ItemType Directory -Path $labDir -Force | Out-Null }
 
+# ------------- fwon.ps1 (with default/save behavior) -------------
 $fwonScript = @'
-#Requires -RunAsAdministrator
-$HostIPFile = "C:\Lab4_HostIP.txt"
+# fwon.ps1 - Allow SSH, block ICMP from Host IP (with default/save)
+$ErrorActionPreference = "Stop"
+$hostIPFile = "C:\Lab4_HostIP.txt"
 
-if (Test-Path $HostIPFile) {
-    $HostIP = Get-Content $HostIPFile
+# Read saved IP if exists
+$defaultIP = $null
+if (Test-Path $hostIPFile) {
+    $defaultIP = Get-Content $hostIPFile -Raw | ForEach-Object { $_.Trim() }
+    if ($defaultIP) {
+        $prompt = "Enter Host IP (default: $defaultIP): "
+    } else {
+        $prompt = "Enter Host IP: "
+        $defaultIP = $null
+    }
 } else {
-    $HostIP = Read-Host "Enter your Host OS (Physical PC) IP address"
-    $HostIP | Out-File -FilePath $HostIPFile -Force
+    $prompt = "Enter Host IP: "
+    $defaultIP = $null
 }
 
-Write-Host "Applying STRICT Firewall Rules (SSH Allowed, Ping Blocked)..." -ForegroundColor Yellow
+# Ask user for IP
+$HostIP = Read-Host $prompt
+if ([string]::IsNullOrWhiteSpace($HostIP)) {
+    if ($defaultIP) {
+        $HostIP = $defaultIP
+        Write-Host "Using saved IP: $HostIP"
+    } else {
+        Write-Host "No IP provided. Exiting."
+        exit 1
+    }
+}
 
-Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
-Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
+# Validate IP (basic)
+if ($HostIP -notmatch '^(\d{1,3}\.){3}\d{1,3}$') {
+    Write-Host "Invalid IP address format. Exiting."
+    exit 1
+}
 
-New-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" `
+# Save the entered IP for next time
+$HostIP | Out-File -FilePath $hostIPFile -Force
+
+# Remove existing rules with same names to avoid duplicates
+Remove-NetFirewallRule -DisplayName "Lab-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Lab-Block-ICMP-Host" -ErrorAction SilentlyContinue
+
+# Allow SSH (TCP 22) only from Host IP
+New-NetFirewallRule -DisplayName "Lab-Allow-SSH-Host" `
     -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow `
-    -RemoteAddress $HostIP -Profile Any | Out-Null
+    -RemoteAddress $HostIP -Profile Any
 
-New-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" `
+# Block ICMP echo request (ping) from Host IP
+New-NetFirewallRule -DisplayName "Lab-Block-ICMP-Host" `
     -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Block `
-    -RemoteAddress $HostIP -Profile Any | Out-Null
+    -RemoteAddress $HostIP -Profile Any
 
-Start-Service sshd -ErrorAction SilentlyContinue
-Set-Service -Name sshd -StartupType Automatic
-
-Write-Host "Firewall is now ON and PERSISTENT." -ForegroundColor Green
-Write-Host "   - SSH from $HostIP : ALLOWED" -ForegroundColor Green
-Write-Host "   - Ping/Other traffic: BLOCKED" -ForegroundColor Green
+Write-Host "Firewall rules applied: SSH allowed, ICMP blocked (only from $HostIP)." -ForegroundColor Green
 '@
-$fwonScript | Out-File -FilePath "$LabDir\fwon.ps1" -Encoding utf8
 
+# ------------- fwoff.ps1 (unchanged) -------------
 $fwoffScript = @'
-#Requires -RunAsAdministrator
-Write-Host "Permanently disabling Lab 4 strict firewall rules..." -ForegroundColor Yellow
-
-Remove-NetFirewallRule -DisplayName "Lab4-Allow-SSH-Host" -ErrorAction SilentlyContinue
-Remove-NetFirewallRule -DisplayName "Lab4-Block-ICMP-Host" -ErrorAction SilentlyContinue
-
-Remove-Item -Path "C:\Lab4_HostIP.txt" -ErrorAction SilentlyContinue
-
-Write-Host "Firewall rules are now PERMANENTLY OFF." -ForegroundColor Green
-Write-Host "They will stay off across reboots until you run fwon again."
+# fwoff.ps1 - Remove the custom rules
+Remove-NetFirewallRule -DisplayName "Lab-Allow-SSH-Host" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Lab-Block-ICMP-Host" -ErrorAction SilentlyContinue
+Write-Host "Custom firewall rules removed. Default behaviour restored." -ForegroundColor Green
 '@
-$fwoffScript | Out-File -FilePath "$LabDir\fwoff.ps1" -Encoding utf8
 
-$fwonCmd = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Lab4\fwon.ps1'"
-$fwoffCmd = "@echo off`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\Lab4\fwoff.ps1'"
+# Save the PowerShell scripts
+$fwonScript | Out-File -FilePath "$labDir\fwon.ps1" -Encoding utf8 -Force
+$fwoffScript | Out-File -FilePath "$labDir\fwoff.ps1" -Encoding utf8 -Force
 
-$fwonCmd | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii
-$fwoffCmd | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii
+# ------------- Create CMD shortcuts in C:\Windows -------------
+$fwonCmd = @"
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$labDir\fwon.ps1"
+"@
 
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "  SHORTCUTS INSTALLED SUCCESSFULLY!" -ForegroundColor Green
-Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "You can now type these commands from ANYWHERE:" -ForegroundColor Yellow
-Write-Host "  fwon   -> Turns strict firewall ON (Persists across reboots)"
-Write-Host "  fwoff  -> Turns firewall OFF permanently (Persists across reboots)"
+$fwoffCmd = @"
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$labDir\fwoff.ps1"
+"@
+
+$fwonCmd | Out-File -FilePath "C:\Windows\fwon.cmd" -Encoding ascii -Force
+$fwoffCmd | Out-File -FilePath "C:\Windows\fwoff.cmd" -Encoding ascii -Force
+
+Write-Host "Shortcuts recreated: 'fwon' and 'fwoff' are now available." -ForegroundColor Green
+Write-Host "  - 'fwon' will show the last used IP as default." -ForegroundColor Cyan
+Write-Host "  - Press Enter to keep it, or type a new IP." -ForegroundColor Cyan
