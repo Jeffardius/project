@@ -1,11 +1,34 @@
 #Requires -RunAsAdministrator
-Write-Host "=== Hardened Firewall Setup ===" -ForegroundColor Cyan
+Write-Host "=== Final Firewall Fix (SSH allowed, ping blocked) ===" -ForegroundColor Cyan
 
-# ---------- Ensure firewall is enabled on all profiles ----------
+# ---------- 1. Remove all custom rules (PowerShell and netsh) ----------
+Write-Host "Removing old custom rules..." -ForegroundColor Yellow
+
+# Remove PowerShell rules (Lab-*)
+Get-NetFirewallRule -DisplayName "Lab-*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+# Remove netsh rules (Lab_*)
+netsh advfirewall firewall delete rule name="Lab_Allow_SSH" > $null 2>&1
+netsh advfirewall firewall delete rule name="Lab_Block_Ping" > $null 2>&1
+# Also remove any other possible custom rules from previous attempts
+netsh advfirewall firewall delete rule name="Block_All_Ping" > $null 2>&1
+netsh advfirewall firewall delete rule name="Allow_SSH_from_Host" > $null 2>&1
+
+Write-Host "Old rules removed." -ForegroundColor Green
+
+# ---------- 2. Ensure firewall is enabled on all profiles ----------
 Set-NetFirewallProfile -All -Enabled True
-Write-Host "Firewall enabled on all profiles." -ForegroundColor Green
 
-# ---------- Get or save Host IP ----------
+# ---------- 3. Disable built‑in ICMPv4 Echo Request rules ----------
+$icmpRules = @(
+    "File and Printer Sharing (Echo Request - ICMPv4-In)",
+    "Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)"
+)
+foreach ($rule in $icmpRules) {
+    Set-NetFirewallRule -DisplayName $rule -Enabled False -ErrorAction SilentlyContinue
+}
+Write-Host "Built-in ICMP Echo Request rules disabled." -ForegroundColor Green
+
+# ---------- 4. Get (or ask for) Host IP ----------
 $hostIPFile = "C:\Lab4_HostIP.txt"
 $defaultIP = if (Test-Path $hostIPFile) { Get-Content $hostIPFile -Raw | ForEach-Object { $_.Trim() } }
 $prompt = if ($defaultIP) { "Enter Host IP (default: $defaultIP): " } else { "Enter Host IP: " }
@@ -14,34 +37,20 @@ if (-not $HostIP -and $defaultIP) { $HostIP = $defaultIP }
 if (-not $HostIP) { Write-Host "No IP provided. Exiting."; exit 1 }
 $HostIP | Out-File -FilePath $hostIPFile -Force
 
-# ---------- Remove all custom rules (to start fresh) ----------
-netsh advfirewall firewall delete rule name="Lab_Allow_SSH" > $null 2>&1
-netsh advfirewall firewall delete rule name="Lab_Block_Ping" > $null 2>&1
-
-# ---------- Disable ALL built-in inbound ICMPv4 Echo Request rules ----------
-$icmpRules = @(
-    "File and Printer Sharing (Echo Request - ICMPv4-In)",
-    "Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)"
-)
-foreach ($rule in $icmpRules) {
-    Set-NetFirewallRule -DisplayName $rule -Enabled False -ErrorAction SilentlyContinue
-}
-Write-Host "Built-in ICMPv4 Echo Request rules disabled." -ForegroundColor Green
-
-# ---------- Create allow rule for SSH from Host IP ----------
+# ---------- 5. Create SSH allow rule (TCP 22) from Host IP ----------
 netsh advfirewall firewall add rule name="Lab_Allow_SSH" dir=in protocol=tcp localport=22 remoteip=$HostIP action=allow
 Write-Host "SSH (TCP 22) allowed from $HostIP." -ForegroundColor Green
 
-# ---------- Create block rule for ICMPv4 Echo Request from Host IP ----------
-# Using netsh with a specific ICMP type
+# ---------- 6. Create ICMP block rule (ping) from Host IP ----------
 netsh advfirewall firewall add rule name="Lab_Block_Ping" dir=in protocol=icmpv4:8,any remoteip=$HostIP action=block
 Write-Host "ICMPv4 Echo Request (ping) blocked from $HostIP." -ForegroundColor Green
 
-# ---------- Verify rules are active ----------
-Write-Host "`nActive firewall rules (custom):" -ForegroundColor Yellow
-netsh advfirewall firewall show rule name="Lab_Allow_SSH" | Select-String "RemoteIP|Enabled|Action"
-netsh advfirewall firewall show rule name="Lab_Block_Ping" | Select-String "RemoteIP|Enabled|Action"
+# ---------- 7. Verify rules ----------
+Write-Host "`n=== Active custom rules ===" -ForegroundColor Cyan
+netsh advfirewall firewall show rule name="Lab_Allow_SSH" | Select-String "Enabled|RemoteIP|Action"
+netsh advfirewall firewall show rule name="Lab_Block_Ping" | Select-String "Enabled|RemoteIP|Action"
 
 Write-Host "`n=== Done ===" -ForegroundColor Green
-Write-Host "Test: From your host (IP $HostIP), try to ping the Gateway. It should fail." -ForegroundColor Cyan
-Write-Host "Test: SSH from your host to the Gateway should succeed." -ForegroundColor Cyan
+Write-Host "Now test:" -ForegroundColor Yellow
+Write-Host "  - ping <Gateway-IP>  (should fail/timeout)" -ForegroundColor White
+Write-Host "  - ssh Administrator@<Gateway-IP>  (should succeed)" -ForegroundColor White
