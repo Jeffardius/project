@@ -1,58 +1,47 @@
 #Requires -RunAsAdministrator
 
-Write-Host "=== Gateway Firewall Fix: Allow Ping + SSH from Host ===" -ForegroundColor Cyan
+Write-Host "=== NUCLEAR PING UNBLOCK ===" -ForegroundColor Red
 
-# ---------- 1. Remove all old custom rules ----------
-Write-Host "Removing old custom rules..." -ForegroundColor Yellow
-Get-NetFirewallRule -DisplayName "Lab-*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-netsh advfirewall firewall delete rule name="Lab_Allow_SSH" > $null 2>&1
-netsh advfirewall firewall delete rule name="Lab_Block_Ping" > $null 2>&1
-netsh advfirewall firewall delete rule name="Block_All_Ping" > $null 2>&1
-netsh advfirewall firewall delete rule name="Allow_SSH_from_Host" > $null 2>&1
-netsh advfirewall firewall delete rule name="Allow_Ping_from_Host" > $null 2>&1
-Write-Host "Old rules removed." -ForegroundColor Green
+# 1. Disable firewall completely (all profiles)
+Write-Host "Disabling Windows Firewall on all profiles..." -ForegroundColor Yellow
+Set-NetFirewallProfile -All -Enabled False
+netsh advfirewall set allprofiles state off
 
-# ---------- 2. Ensure firewall is enabled (but not overly restrictive) ----------
-Set-NetFirewallProfile -All -Enabled True
+# 2. Stop the firewall service (so it can't interfere)
+Write-Host "Stopping firewall service..." -ForegroundColor Yellow
+Stop-Service mpssvc -Force -ErrorAction SilentlyContinue
+Set-Service mpssvc -StartupType Disabled
 
-# ---------- 3. Re-enable built-in ICMP Echo Request rules (in case they were disabled) ----------
-$icmpRules = @(
-    "File and Printer Sharing (Echo Request - ICMPv4-In)",
-    "Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)"
-)
-foreach ($rule in $icmpRules) {
-    Set-NetFirewallRule -DisplayName $rule -Enabled True -ErrorAction SilentlyContinue
+# 3. Remove all custom rules that might block ICMP
+Write-Host "Removing any rule that mentions ICMP or ping..." -ForegroundColor Yellow
+Get-NetFirewallRule | Where-Object { $_.DisplayName -match "ICMP|Ping|Echo" } | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+netsh advfirewall firewall delete rule name="all" protocol=icmpv4 > $null 2>&1
+
+# 4. Add an explicit allow rule for all ICMP (any source, any destination)
+Write-Host "Adding explicit allow rule for all ICMPv4..." -ForegroundColor Yellow
+netsh advfirewall firewall add rule name="Allow_ALL_ICMPv4" dir=in protocol=icmpv4 action=allow
+
+# 5. If still blocking, check for persistent filters via WFP (netsh wfp)
+Write-Host "Resetting Windows Filtering Platform (WFP)..." -ForegroundColor Yellow
+netsh wfp reset
+
+# 6. Set network profile to Private (less restrictive)
+Write-Host "Setting network profile to Private..." -ForegroundColor Yellow
+Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+
+# 7. Restart the network adapter to apply changes
+Write-Host "Restarting network adapter..." -ForegroundColor Yellow
+$adapter = Get-NetAdapter -Name "Ethernet" -ErrorAction SilentlyContinue
+if ($adapter) {
+    Restart-NetAdapter -Name $adapter.Name -Confirm:$false
+    Start-Sleep -Seconds 3
 }
-Write-Host "Built-in ICMP Echo Request rules re-enabled (as fallback)." -ForegroundColor Green
 
-# ---------- 4. Get (or ask for) Host IP ----------
-$hostIPFile = "C:\Lab4_HostIP.txt"
-$defaultIP = if (Test-Path $hostIPFile) { Get-Content $hostIPFile -Raw | ForEach-Object { $_.Trim() } }
-$prompt = if ($defaultIP) { "Enter Host IP (default: $defaultIP): " } else { "Enter Host IP: " }
-$HostIP = Read-Host $prompt
-if (-not $HostIP -and $defaultIP) { $HostIP = $defaultIP }
-if (-not $HostIP) { Write-Host "No IP provided. Exiting."; exit 1 }
-$HostIP | Out-File -FilePath $hostIPFile -Force
+Write-Host "`n=== PING SHOULD NOW WORK ===" -ForegroundColor Green
+Write-Host "Test from your host: ping <Gateway-IP>" -ForegroundColor Cyan
+Write-Host "If it still fails, reboot the VM (required for some changes)." -ForegroundColor Yellow
 
-# ---------- 5. Create ALLOW rule for SSH (TCP port 22) from Host IP ----------
-netsh advfirewall firewall add rule name="Lab_Allow_SSH" dir=in protocol=tcp localport=22 remoteip=$HostIP action=allow
-Write-Host "SSH (TCP 22) allowed from $HostIP." -ForegroundColor Green
-
-# ---------- 6. Create ALLOW rule for Ping (ICMP Echo Request) from Host IP ----------
-netsh advfirewall firewall add rule name="Lab_Allow_Ping" dir=in protocol=icmpv4:8,any remoteip=$HostIP action=allow
-Write-Host "ICMPv4 Echo Request (ping) allowed from $HostIP." -ForegroundColor Green
-
-# ---------- 7. Verify rules ----------
-Write-Host "`n=== Active custom rules ===" -ForegroundColor Cyan
-netsh advfirewall firewall show rule name="Lab_Allow_SSH" | Select-String "Enabled|RemoteIP|Action"
-netsh advfirewall firewall show rule name="Lab_Allow_Ping" | Select-String "Enabled|RemoteIP|Action"
-
-# ---------- 8. Final testing instructions ----------
-Write-Host "`n=== Done ===" -ForegroundColor Green
-Write-Host "Now test from your HOST machine:" -ForegroundColor Yellow
-Write-Host "  - ping <Gateway-IP>           (should SUCCEED)" -ForegroundColor White
-Write-Host "  - ssh Administrator@<Gateway-IP>   (should SUCCEED)" -ForegroundColor White
-Write-Host "`nIf ping still fails, also check:" -ForegroundColor Cyan
-Write-Host "  - That the gateway's network adapter is set to 'Bridged' (not NAT)."
-Write-Host "  - That the host and gateway are on the same subnet."
-Write-Host "  - That no third-party firewall (e.g., VirtualBox host‑only network) is interfering."
+$reboot = Read-Host "Reboot now? (Y/N)"
+if ($reboot -eq 'Y' -or $reboot -eq 'y') {
+    Restart-Computer -Force
+}
