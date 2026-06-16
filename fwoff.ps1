@@ -1,14 +1,29 @@
-# fwoff.ps1 - Remove the rules created by fwon.ps1, restore default ICMP behaviour.
-# Requires Administrator.
+# fwoff.ps1 - Remove all custom rules created by fwon and restore default ICMP behaviour.
+# Run as Administrator.
+
 $ErrorActionPreference = "Stop"
 
-# Delete the custom rules
-netsh advfirewall firewall delete rule name="BlockPingFromHost" > $null 2>&1
-netsh advfirewall firewall delete rule name="AllowSSHFromHost" > $null 2>&1
+# Delete all known custom rules (by name patterns)
+$ruleNames = @(
+    "BlockPingFromHost",
+    "AllowSSHFromHost",
+    "Lab_Block_Ping",
+    "Lab_Allow_SSH",
+    "Lab-Block-ICMP-Host",
+    "Lab-Allow-SSH-Host",
+    "Lab-Block-All-Other-Host",
+    "Block_All_Ping",
+    "Allow_SSH_from_Host"
+)
+foreach ($name in $ruleNames) {
+    netsh advfirewall firewall delete rule name="$name" > $null 2>&1
+}
 
-# Re-enable the built-in ICMP echo request rules (optional but good)
+# Also remove any PowerShell rules with "Lab-" prefix (just in case)
+Get-NetFirewallRule -DisplayName "Lab-*" | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
+# Re-enable the built-in ICMP echo request rules
 netsh advfirewall firewall set rule group="File and Printer Sharing" new enable=Yes > $null 2>&1
 netsh advfirewall firewall set rule name="Core Networking Diagnostics - ICMP Echo Request (ICMPv4-In)" new enable=Yes > $null 2>&1
 
-Write-Host "Done. Ping is now allowed again (default behaviour)."
-Write-Host "SSH is no longer specifically allowed from your host; default rules apply."
+Write-Host "Done. All custom rules removed. Ping should now work (default behaviour)."
