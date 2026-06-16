@@ -1,56 +1,77 @@
 #Requires -RunAsAdministrator
+Write-Host "=== Firewall Diagnostic Script ===" -ForegroundColor Cyan
 
-Write-Host "===== VM Duplicate IP Address Fix =====" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "This script will fix the '192.168.40.82' IP address conflict by:"
-Write-Host "1. Resetting the network adapter"
-Write-Host "2. Disabling Windows' duplicate IP detection"
-Write-Host "3. Forcing a new IP address from the DHCP server"
-Write-Host ""
-Write-Host "Press any key to continue..."
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+# 1. Windows Firewall service status
+Write-Host "`n[1] Windows Firewall Service:" -ForegroundColor Yellow
+Get-Service mpssvc | Format-List Name, Status, StartType
 
-# --- 1. Identify the network adapter and disable duplicate IP detection ---
-$adapter = Get-NetAdapter -Name "Ethernet" -ErrorAction SilentlyContinue
-if (-not $adapter) {
-    Write-Host "Network adapter 'Ethernet' not found!" -ForegroundColor Red
-    exit 1
-}
+# 2. Firewall profile status (enabled/disabled)
+Write-Host "`n[2] Firewall Profile Status (Enabled = filtering is active):" -ForegroundColor Yellow
+Get-NetFirewallProfile | Select-Object Name, Enabled
 
-Write-Host "Found adapter: $($adapter.Name) (MAC: $($adapter.MacAddress))" -ForegroundColor Green
+# 3. List all custom rules (names containing "Block" or "Allow" from our scripts)
+Write-Host "`n[3] Custom Rules (likely from our scripts):" -ForegroundColor Yellow
+Get-NetFirewallRule | Where-Object {
+    $_.DisplayName -match "Block|Allow|Lab|Ping|SSH"
+} | Format-Table DisplayName, Enabled, Direction, Action, RemoteAddress -AutoSize
 
-Write-Host "Attempting to disable Duplicate Address Detection..." -ForegroundColor Yellow
-try {
-    Set-NetIPInterface -InterfaceAlias $adapter.Name -AddressFamily IPv4 -DadTransmits 0 -ErrorAction Stop
-    Write-Host "Successfully disabled duplicate IP detection." -ForegroundColor Green
-} catch {
-    Write-Host "Could not disable Duplicate Address Detection. This might be because the setting is already applied." -ForegroundColor Yellow
-}
+# Also check netsh rules (older ones)
+Write-Host "`n[4] Netsh advfirewall rules (custom):" -ForegroundColor Yellow
+netsh advfirewall firewall show rule name=all | Select-String -Pattern "Rule Name:|Enabled:|RemoteIP:|LocalPort:|Protocol:" -Context 0,0 | Out-String
 
-# --- 2. Force a hard reset of the network adapter ---
-Write-Host "Performing a hard reset of the network adapter..." -ForegroundColor Yellow
-Restart-NetAdapter -Name $adapter.Name -Confirm:$false
+# 5. Specifically check ICMPv4 Echo Request rules (both built-in and custom)
+Write-Host "`n[5] ICMPv4 Echo Request (ping) rules - Inbound:" -ForegroundColor Yellow
+Get-NetFirewallRule -Direction Inbound | Where-Object {
+    ($_.DisplayName -like "*Echo Request*") -or ($_.DisplayName -like "*ICMP*")
+} | Format-Table DisplayName, Enabled, Profile, Action -AutoSize
 
-Write-Host "Releasing current IP address..."
-ipconfig /release
+# 6. Check if any explicit block rules for your host IP (e.g., 10.0.0.66)
+Write-Host "`n[6] Rules with RemoteAddress containing your host IP (10.0.0.66):" -ForegroundColor Yellow
+Get-NetFirewallRule | ForEach-Object {
+    $rule = $_
+    $addr = Get-NetFirewallRemoteAddress -PolicyStore $rule.PolicyStoreSource -ErrorAction SilentlyContinue
+    if ($addr -and $addr.ToString() -match "10\.0\.0\.66") {
+        [PSCustomObject]@{
+            Name = $rule.DisplayName
+            Enabled = $rule.Enabled
+            Action = $rule.Action
+            RemoteAddress = $addr.ToString()
+        }
+    }
+} | Format-Table -AutoSize
 
-Write-Host "Waiting a moment before renewing..."
-Start-Sleep -Seconds 3
+# 7. Check effective policy (could be overridden by group policy)
+Write-Host "`n[7] Effective Firewall Policy (local or domain):" -ForegroundColor Yellow
+Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object {
+    $_.DisplayName -match "Echo|ICMP|Ping|SSH|Block|Allow"
+} | Select-Object -First 20 | Format-Table DisplayName, Enabled, Action, Direction -AutoSize
 
-Write-Host "Requesting a new IP address from the DHCP server..."
-ipconfig /renew
+# 8. Check if any other security software is running
+Write-Host "`n[8] Other Security Software (antivirus/third-party firewalls):" -ForegroundColor Yellow
+Get-Process | Where-Object {
+    $_.ProcessName -match "defender|firewall|security|avp|avg|norton|mcafee|symantec"
+} | Select-Object ProcessName, Id
 
-# --- 3. Final check and reboot recommendation ---
-Write-Host ""
-Write-Host "===== Script Finished =====" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "IMPORTANT: To ensure the fix is permanent, you MUST restart your VM now."
-Write-Host ""
-$restartChoice = Read-Host "Do you want to restart this VM now? (Y/N)"
-if ($restartChoice -eq 'Y' -or $restartChoice -eq 'y') {
-    Write-Host "Restarting VM in 5 seconds..."
-    Start-Sleep -Seconds 5
-    Restart-Computer -Force
-} else {
-    Write-Host "Remember to manually restart your VM for the changes to take full effect." -ForegroundColor Yellow
-}
+# 9. Network interface status and assigned IPs
+Write-Host "`n[9] Network Interfaces (relevant):" -ForegroundColor Yellow
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+    $_.InterfaceAlias -notlike "*Loopback*"
+} | Format-Table InterfaceAlias, IPAddress, PrefixLength
+
+Write-Host "`n[10] Last attempt to remove custom rules (simulate fwoff):" -ForegroundColor Yellow
+Write-Host "Running cleanup commands from fwoff..."
+netsh advfirewall firewall delete rule name="BlockPingFromHost" > $null 2>&1
+netsh advfirewall firewall delete rule name="AllowSSHFromHost" > $null 2>&1
+netsh advfirewall firewall delete rule name="Lab-Block-ICMP-Host" > $null 2>&1
+netsh advfirewall firewall delete rule name="Lab-Allow-SSH-Host" > $null 2>&1
+netsh advfirewall firewall delete rule name="Lab-Block-All-Other-Host" > $null 2>&1
+netsh advfirewall firewall delete rule name="Block_All_Ping" > $null 2>&1
+netsh advfirewall firewall delete rule name="Allow_SSH_from_Host" > $null 2>&1
+Get-NetFirewallRule -DisplayName "Lab-*" | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Write-Host "Cleanup attempted. Re-checking custom rules now..." -ForegroundColor Green
+Get-NetFirewallRule | Where-Object {
+    $_.DisplayName -match "Block|Allow|Lab|Ping|SSH"
+} | Format-Table DisplayName, Enabled, Action -AutoSize
+
+Write-Host "`n=== Diagnostic Complete ===" -ForegroundColor Cyan
+Write-Host "If ping still fails, check the output for any remaining Block rules." -ForegroundColor Yellow
